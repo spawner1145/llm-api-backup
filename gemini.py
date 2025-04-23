@@ -16,8 +16,8 @@ class GeminiAPI:
     def __init__(
         self,
         apikey: str,
-        baseurl: str = "https://generativelanguage.googleapis.com/v1beta",
-        model: str = "gemini-2.0-flash-001",  # 默认支持多模态的模型
+        baseurl: str = "https://generativelanguage.googleapis.com",
+        model: str = "gemini-2.0-flash-001",  # 更新为支持多模态的模型
         proxy: Optional[str] = None
     ):
         self.apikey = apikey
@@ -56,51 +56,63 @@ class GeminiAPI:
         if mime_type not in supported_mime_types:
             logger.warning(f"MIME 类型 {mime_type} 可能不受支持，可能导致上传失败")
 
-        async with aiofiles.open(file_path, 'rb') as f:
-            file_content = await f.read()
-
-        metadata = {
-            "file": {
-                "displayName": display_name or os.path.basename(file_path),
-                "mimeType": mime_type
-            }
-        }
-
-        files = {
-            "file": (metadata["file"]["displayName"], file_content, mime_type),
-            "metadata": (None, json.dumps(metadata), "application/json")
-        }
-
+        # 上传文件
         try:
-            response = await self.client.post("/upload/files", files=files)
-            response.raise_for_status()
+            async with aiofiles.open(file_path, 'rb') as f:
+                files = {'file': (display_name or os.path.basename(file_path), await f.read(), mime_type)}
+                logger.info(f"上传文件请求: {file_path}")
+                response = await self.client.post("/upload/v1beta/files", files=files)
+                response.raise_for_status()
+                file_data = response.json()
+                logger.info(f"文件上传响应: {file_data}")
+                file_uri = file_data['file'].get('uri')
+                if not file_uri:
+                    logger.error(f"文件 {file_path} 上传成功但未返回 URI: {file_data}")
+                    return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 上传成功但未返回 URI"}
         except httpx.HTTPStatusError as e:
-            logger.error(f"文件 {file_path} 上传失败: {response.text}")
-            return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 上传失败: {response.text}"}
+            logger.error(f"文件 {file_path} 上传失败: {e.response.text}")
+            return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 上传失败: {e.response.text}"}
+        except Exception as e:
+            logger.error(f"文件 {file_path} 上传失败: {str(e)}")
+            return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 上传失败: {str(e)}"}
 
-        file_data = response.json()
-        file_name = file_data["file"]["name"]
+        # 等待文件状态变为 ACTIVE
+        if not await self.wait_for_file_active(file_uri, timeout=120, interval=2):
+            logger.error(f"文件 {file_path} 未能在规定时间内变为 ACTIVE 状态")
+            return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 未能在规定时间内变为 ACTIVE 状态"}
 
-        # 轮询文件状态（特别是视频）
-        for _ in range(60):  # 最多等待 120 秒
+        logger.info(f"文件 {file_path} 上传并激活成功，URI: {file_uri}")
+        return {"fileUri": file_uri, "mimeType": mime_type, "error": None}
+
+    async def wait_for_file_active(self, file_uri: str, timeout: Optional[int] = None, interval: int = 2) -> bool:
+        """等待文件状态变为 ACTIVE"""
+        file_id = file_uri.split('/')[-1]  # 提取文件 ID
+        start_time = asyncio.get_event_loop().time()
+
+        while timeout is None or (asyncio.get_event_loop().time() - start_time < timeout):
             try:
-                status_response = await self.client.get(f"/files/{file_name}")
-                status_response.raise_for_status()
-                status = status_response.json()
-                if status["state"] == "ACTIVE":
-                    return {"fileUri": status["uri"], "mimeType": mime_type}
-                elif status["state"] == "FAILED":
-                    return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 处理失败: {status.get('error', '未知错误')}"}
-                elif status["state"] == "PROCESSING":
-                    logger.info(f"文件 {file_name} 正在处理，等待 2 秒...")
-                    await asyncio.sleep(2)
+                response = await self.client.get(f"/v1beta/files/{file_id}")
+                response.raise_for_status()
+                file_info = response.json()
+                logger.debug(f"文件 {file_id} 状态响应: {file_info}")
+                state = file_info.get('state')
+                if state == "ACTIVE":
+                    logger.info(f"文件 {file_id} 已就绪，状态: {state}")
+                    return True
+                elif state == "FAILED":
+                    logger.error(f"文件 {file_id} 处理失败，状态: {state}")
+                    return False
                 else:
-                    return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 未知状态: {status['state']}"}
+                    logger.info(f"文件 {file_id} 仍在处理中，状态: {state}")
+                    await asyncio.sleep(interval)
             except httpx.HTTPStatusError as e:
-                logger.error(f"检查文件 {file_path} 状态失败: {e}")
-                return {"fileUri": None, "mimeType": None, "error": f"检查文件 {file_path} 状态失败: {str(e)}"}
-
-        return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 处理超时"}
+                logger.error(f"检查文件 {file_id} 状态失败: {e.response.text}")
+                return False
+            except Exception as e:
+                logger.error(f"检查文件 {file_id} 状态失败: {str(e)}")
+                return False
+        logger.error(f"等待文件 {file_id} 超时 ({timeout}秒)")
+        return False
 
     async def upload_files(self, file_paths: List[str], display_names: Optional[List[str]] = None) -> List[Dict[str, Union[str, None]]]:
         """并行上传多个文件到 Gemini File API"""
@@ -234,7 +246,7 @@ class GeminiAPI:
         if thinking_budget is not None:
             if not isinstance(thinking_budget, int) or thinking_budget < 0 or thinking_budget > 24576:
                 raise ValueError("thinking_budget 必须是 0 到 24576 之间的整数")
-            if self.model not in ["gemini-2.5-flash", "gemini-2.5-pro"]:
+            if self.model not in ["gemini-1.5-flash", "gemini-1.5-pro"]:
                 logger.warning(f"模型 {self.model} 不支持 thinking_budget，已忽略该参数")
                 thinking_budget = None
                 enable_thinking = False
@@ -320,7 +332,7 @@ class GeminiAPI:
         if generation_config:
             body["generationConfig"] = generation_config
 
-        endpoint = f"/models/{self.model}:{'streamGenerateContent' if stream else 'generateContent'}"
+        endpoint = f"/v1beta/models/{self.model}:{'streamGenerateContent' if stream else 'generateContent'}"
         logger.info(f"请求端点: {endpoint}")
 
         if stream:
@@ -429,10 +441,7 @@ class GeminiAPI:
                 except httpx.HTTPStatusError as e:
                     logger.error(f"HTTP 错误 (尝试 {attempt+1}/{retries}): {e}")
                     logger.error(f"失败的请求体: {json.dumps(body, ensure_ascii=False, indent=2)}")
-                    try:
-                        logger.error(f"服务器响应: {response.text}")
-                    except:
-                        logger.error("无法获取服务器响应内容")
+                    logger.error(f"服务器响应: {e.response.text}")
                     if attempt == retries - 1:
                         raise
                     await asyncio.sleep(2 ** attempt)
@@ -522,7 +531,7 @@ class GeminiAPI:
                 messages.append({"role": "assistant", "parts": parts})
             else:
                 messages.append({"role": "assistant", "parts": [{"text": full_text}]})
-            logger.info(f"最终消息列表: {json.dumps(messages, ensure_ascii=False, indent=2)}")
+            #logger.info(f"最终消息列表: {json.dumps(messages, ensure_ascii=False, indent=2)}")
 
     async def __aenter__(self):
         return self
@@ -657,21 +666,6 @@ async def main():
     print("更新后的消息列表：", messages)
     print()
 
-
-    # 示例 10：Logprobs 输出（非流式）
-    '''print("示例 10：Logprobs 输出（非流式）")
-    messages = [
-        {"role": "user", "parts": [{"text": "法国的首都是哪里？"}]}
-    ]
-    async for part in api.chat(messages, stream=False, response_logprobs=True, logprobs=5):
-        if isinstance(part, dict):
-            print("回答:", part["text"])
-            print("Logprobs:", part["logprobs"])
-        else:
-            print(part)
-    print("更新后的消息列表：", messages)
-    print()'''
-
     # 示例 11：并行使用 File API 上传多个图像并生成描述（非流式）
     print("示例 11：并行使用 File API 上传多个图像并生成描述（非流式）")
     try:
@@ -697,7 +691,7 @@ async def main():
     # 示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）
     print("示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）")
     try:
-        media_files = ["ComfyUI_temp_poxuo_00001_.png", "QQ2025418-133636.mp4"]  # 请替换为实际文件路径
+        media_files = ["《Break the Cocoon》封面.jpg", "QQ2025418-133636.mp4"]  # 请替换为实际文件路径
         file_data_list = await api.upload_files(media_files, display_names=["Image 1", "Video 1"])
         parts = [{"text": "总结这些媒体文件的内容。"}]
         for file_data in file_data_list:
