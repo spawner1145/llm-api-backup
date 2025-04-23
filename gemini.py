@@ -496,7 +496,7 @@ class GeminiAPI:
                     parts.append(p)
             api_contents.append({"role": role, "parts": parts})
 
-        logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
+        #logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
 
         full_text = ""
         thoughts = []
