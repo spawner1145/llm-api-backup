@@ -2,6 +2,8 @@ import httpx
 import json
 import mimetypes
 import asyncio
+import base64
+import os
 from typing import AsyncGenerator, Dict, List, Optional, Union, Callable
 import aiofiles
 import logging
@@ -15,7 +17,7 @@ class GeminiAPI:
         self,
         apikey: str,
         baseurl: str = "https://generativelanguage.googleapis.com/v1beta",
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-2.0-flash-001",  # 默认支持多模态的模型
         proxy: Optional[str] = None
     ):
         self.apikey = apikey
@@ -28,18 +30,38 @@ class GeminiAPI:
             timeout=60.0
         )
 
-    async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, str]:
-        """上传文件到 Gemini API"""
+    async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
+        """上传单个文件到 Gemini File API，并检查 ACTIVE 状态"""
+        # 验证文件大小
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size > 2 * 1024 * 1024 * 1024:  # 2GB 限制
+                raise ValueError(f"文件 {file_path} 大小超过 2GB 限制")
+        except FileNotFoundError:
+            logger.error(f"文件 {file_path} 不存在")
+            return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 不存在"}
+
         mime_type, _ = mimetypes.guess_type(file_path)
         if not mime_type:
             mime_type = "application/octet-stream"
+            logger.warning(f"无法检测文件 {file_path} 的 MIME 类型，使用默认值: {mime_type}")
+
+        # 检查支持的 MIME 类型
+        supported_mime_types = [
+            "image/jpeg", "image/png", "image/gif", "image/webp",
+            "video/mp4", "video/mpeg", "video/avi", "video/wmv", "video/flv",
+            "audio/mp3", "audio/wav", "audio/ogg", "audio/flac",
+            "text/plain", "text/markdown"
+        ]
+        if mime_type not in supported_mime_types:
+            logger.warning(f"MIME 类型 {mime_type} 可能不受支持，可能导致上传失败")
 
         async with aiofiles.open(file_path, 'rb') as f:
             file_content = await f.read()
 
         metadata = {
             "file": {
-                "displayName": display_name or file_path.split('/')[-1],
+                "displayName": display_name or os.path.basename(file_path),
                 "mimeType": mime_type
             }
         }
@@ -49,22 +71,105 @@ class GeminiAPI:
             "metadata": (None, json.dumps(metadata), "application/json")
         }
 
-        response = await self.client.post("/upload/files", files=files)
-        response.raise_for_status()
+        try:
+            response = await self.client.post("/upload/files", files=files)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"文件 {file_path} 上传失败: {response.text}")
+            return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 上传失败: {response.text}"}
+
         file_data = response.json()
-
         file_name = file_data["file"]["name"]
-        for _ in range(10):
-            status_response = await self.client.get(f"/files/{file_name}")
-            status_response.raise_for_status()
-            status = status_response.json()
-            if status["state"] == "ACTIVE":
-                return {"fileUri": status["uri"], "mimeType": mime_type}
-            elif status["state"] == "FAILED":
-                raise ValueError(f"文件处理失败: {status.get('error', '未知错误')}")
-            await asyncio.sleep(2)
 
-        raise ValueError("文件处理超时")
+        # 轮询文件状态（特别是视频）
+        for _ in range(60):  # 最多等待 120 秒
+            try:
+                status_response = await self.client.get(f"/files/{file_name}")
+                status_response.raise_for_status()
+                status = status_response.json()
+                if status["state"] == "ACTIVE":
+                    return {"fileUri": status["uri"], "mimeType": mime_type}
+                elif status["state"] == "FAILED":
+                    return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 处理失败: {status.get('error', '未知错误')}"}
+                elif status["state"] == "PROCESSING":
+                    logger.info(f"文件 {file_name} 正在处理，等待 2 秒...")
+                    await asyncio.sleep(2)
+                else:
+                    return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 未知状态: {status['state']}"}
+            except httpx.HTTPStatusError as e:
+                logger.error(f"检查文件 {file_path} 状态失败: {e}")
+                return {"fileUri": None, "mimeType": None, "error": f"检查文件 {file_path} 状态失败: {str(e)}"}
+
+        return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 处理超时"}
+
+    async def upload_files(self, file_paths: List[str], display_names: Optional[List[str]] = None) -> List[Dict[str, Union[str, None]]]:
+        """并行上传多个文件到 Gemini File API"""
+        if not file_paths:
+            raise ValueError("文件路径列表不能为空")
+
+        if display_names and len(display_names) != len(file_paths):
+            raise ValueError("display_names 长度必须与 file_paths 一致")
+
+        # 创建并行上传任务
+        tasks = []
+        for idx, file_path in enumerate(file_paths):
+            display_name = display_names[idx] if display_names else None
+            tasks.append(self.upload_file(file_path, display_name))
+
+        # 并行执行上传
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        final_results = []
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"上传文件 {file_paths[idx]} 失败: {str(result)}")
+                final_results.append({"fileUri": None, "mimeType": None, "error": str(result)})
+            else:
+                final_results.append(result)
+        return final_results
+
+    async def prepare_inline_data(self, file_path: str) -> Dict[str, Dict[str, str]]:
+        """将单个小文件转换为 Base64 编码的 inlineData"""
+        file_size = os.path.getsize(file_path)
+        # Base64 编码后大小增加约 33%，检查是否超 20MB
+        if file_size * 4 / 3 > 20 * 1024 * 1024:
+            raise ValueError(f"文件 {file_path} 过大，无法作为 inlineData，建议使用 File API 上传")
+
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if not mime_type:
+            mime_type = "application/octet-stream"
+            logger.warning(f"无法检测文件 {file_path} 的 MIME 类型，使用默认值: {mime_type}")
+
+        async with aiofiles.open(file_path, 'rb') as f:
+            file_content = await f.read()
+
+        base64_data = base64.b64encode(file_content).decode('utf-8')
+        return {
+            "inlineData": {
+                "mimeType": mime_type,
+                "data": base64_data
+            }
+        }
+
+    async def prepare_inline_data_batch(self, file_paths: List[str]) -> List[Dict[str, Union[Dict[str, str], None]]]:
+        """将多个小文件转换为 Base64 编码的 inlineData 列表"""
+        if not file_paths:
+            raise ValueError("文件路径列表不能为空")
+
+        total_size = 0
+        results = []
+        for file_path in file_paths:
+            try:
+                file_size = os.path.getsize(file_path)
+                encoded_size = file_size * 4 / 3  # Base64 编码后大小
+                total_size += encoded_size
+                if total_size > 20 * 1024 * 1024:
+                    raise ValueError(f"文件 {file_path} 加入后总大小超过 20MB，无法作为 inlineData")
+                inline_data = await self.prepare_inline_data(file_path)
+                results.append(inline_data)
+            except Exception as e:
+                logger.error(f"处理文件 {file_path} 失败: {str(e)}")
+                results.append({"inlineData": None, "error": str(e)})
+        return results
 
     async def _execute_tool(
         self,
@@ -362,9 +467,9 @@ class GeminiAPI:
         safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict, List[Dict[str, any]]], None]:
-        """发起聊天请求，支持所有 Gemini 模型参数,见https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini?hl=zh-cn"""
+        """发起聊天请求，支持多文件上传和多内联内容"""
         if isinstance(messages, str):
-            messages = [{"role": "user", "parts": [messages]}]
+            messages = [{"role": "user", "parts": [{"text": messages}]}]
             use_history = False
         else:
             use_history = True
@@ -372,10 +477,17 @@ class GeminiAPI:
         api_contents = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
-            parts = [{"text": p} if isinstance(p, str) else p for p in msg["parts"]]
+            parts = []
+            for p in msg["parts"]:
+                if isinstance(p, str):
+                    parts.append({"text": p})
+                elif isinstance(p, dict) and ("fileData" in p or "inlineData" in p):
+                    parts.append(p)
+                else:
+                    parts.append(p)
             api_contents.append({"role": role, "parts": parts})
 
-        #logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
+        logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
 
         full_text = ""
         thoughts = []
@@ -409,7 +521,7 @@ class GeminiAPI:
                     parts.append({"logprobs": logprobs_data})
                 messages.append({"role": "assistant", "parts": parts})
             else:
-                messages.append({"role": "assistant", "parts": [full_text]})
+                messages.append({"role": "assistant", "parts": [{"text": full_text}]})
             logger.info(f"最终消息列表: {json.dumps(messages, ensure_ascii=False, indent=2)}")
 
     async def __aenter__(self):
@@ -449,9 +561,9 @@ async def main():
     # 示例 2：多轮对话（非流式）
     print("示例 2：多轮对话（非流式）")
     messages = [
-        {"role": "user", "parts": ["法国的首都是哪里？"]},
-        {"role": "assistant", "parts": ["法国的首都是巴黎。"]},
-        {"role": "user", "parts": ["巴黎的人口是多少？"]}
+        {"role": "user", "parts": [{"text": "法国的首都是哪里？"}]},
+        {"role": "assistant", "parts": [{"text": "法国的首都是巴黎。"}]},
+        {"role": "user", "parts": [{"text": "巴黎的人口是多少？"}]}
     ]
     async for part in api.chat(messages, stream=False):
         print(part)
@@ -467,9 +579,9 @@ async def main():
     # 示例 4：多轮对话（流式，带工具）
     print("示例 4：多轮对话（流式，带工具）")
     messages = [
-        {"role": "user", "parts": ["你好！"]},
-        {"role": "assistant", "parts": ["你好！有什么可以帮助你的？"]},
-        {"role": "user", "parts": ["今天纽约的天气如何？"]}
+        {"role": "user", "parts": [{"text": "你好！"}]},
+        {"role": "assistant", "parts": [{"text": "你好！有什么可以帮助你的？"}]},
+        {"role": "user", "parts": [{"text": "今天纽约的天气如何？"}]}
     ]
     async for part in api.chat(messages, stream=True, tools=tools):
         print(part, end="", flush=True)
@@ -479,7 +591,7 @@ async def main():
     # 示例 5：多个工具调用（非流式）
     print("示例 5：多个工具调用（非流式）")
     messages = [
-        {"role": "user", "parts": ["请安排一个明天上午10点的会议，持续1小时，与会者是Alice和Bob。然后告诉我纽约的天气和时间。"]}
+        {"role": "user", "parts": [{"text": "请安排一个明天上午10点的会议，持续1小时，与会者是Alice和Bob。然后告诉我纽约的天气和时间。"}]}
     ]
     async for part in api.chat(messages, stream=False, tools=tools):
         print(part)
@@ -489,7 +601,7 @@ async def main():
     # 示例 6：思考模式（非流式，启用思考）
     print("示例 6：思考模式（非流式，启用思考）")
     messages = [
-        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+        {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
     async for part in api.chat(messages, stream=False, thinking_budget=24576):
         if isinstance(part, dict):
@@ -505,7 +617,7 @@ async def main():
     # 示例 7：思考模式（流式，启用思考）
     print("示例 7：思考模式（流式，启用思考）")
     messages = [
-        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+        {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
     async for part in api.chat(messages, stream=True, thinking_budget=24576):
         if isinstance(part, dict) and "thoughts" in part:
@@ -518,7 +630,7 @@ async def main():
     # 示例 8：思考模式（非流式，禁用思考）
     print("示例 8：思考模式（非流式，禁用思考）")
     messages = [
-        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+        {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
     async for part in api.chat(messages, stream=False, thinking_budget=0):
         print("最终回答:", part)
@@ -536,13 +648,124 @@ async def main():
         "required": ["name", "age"]
     }
     messages = [
-        {"role": "user", "parts": ["请提供一个人的信息，包括姓名和年龄。"]}
+        {"role": "user", "parts": [{"text": "请提供一个人的信息，包括姓名和年龄。"}]}
     ]
     async for part in api.chat(
         messages, stream=False, response_mime_type="application/json", response_schema=schema
     ):
         print("结构化输出:", part)
     print("更新后的消息列表：", messages)
+    print()
+
+
+    # 示例 10：Logprobs 输出（非流式）
+    '''print("示例 10：Logprobs 输出（非流式）")
+    messages = [
+        {"role": "user", "parts": [{"text": "法国的首都是哪里？"}]}
+    ]
+    async for part in api.chat(messages, stream=False, response_logprobs=True, logprobs=5):
+        if isinstance(part, dict):
+            print("回答:", part["text"])
+            print("Logprobs:", part["logprobs"])
+        else:
+            print(part)
+    print("更新后的消息列表：", messages)
+    print()'''
+
+    # 示例 11：并行使用 File API 上传多个图像并生成描述（非流式）
+    print("示例 11：并行使用 File API 上传多个图像并生成描述（非流式）")
+    try:
+        image_files = ["《Break the Cocoon》封面.jpg", "ComfyUI_temp_poxuo_00001_.png"]  # 请替换为实际图像路径
+        file_data_list = await api.upload_files(image_files, display_names=["Image 1", "Image 2"])
+        parts = [{"text": "描述这些图片中的内容。"}]
+        for file_data in file_data_list:
+            if file_data["fileUri"]:
+                parts.append({"fileData": {"fileUri": file_data["fileUri"], "mimeType": file_data["mimeType"]}})
+            else:
+                print(f"文件上传失败: {file_data['error']}")
+        if not any("fileData" in part for part in parts[1:]):
+            print("所有文件上传失败，跳过请求")
+        else:
+            messages = [{"role": "user", "parts": parts}]
+            async for part in api.chat(messages, stream=False):
+                print("多图像描述:", part)
+            print("更新后的消息列表：", messages)
+    except FileNotFoundError as e:
+        print(f"文件不存在: {e}")
+    print()
+
+    # 示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）
+    print("示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）")
+    try:
+        media_files = ["ComfyUI_temp_poxuo_00001_.png", "QQ2025418-133636.mp4"]  # 请替换为实际文件路径
+        file_data_list = await api.upload_files(media_files, display_names=["Image 1", "Video 1"])
+        parts = [{"text": "总结这些媒体文件的内容。"}]
+        for file_data in file_data_list:
+            if file_data["fileUri"]:
+                parts.append({"fileData": {"fileUri": file_data["fileUri"], "mimeType": file_data["mimeType"]}})
+            else:
+                print(f"文件上传失败: {file_data['error']}")
+        if not any("fileData" in part for part in parts[1:]):
+            print("所有文件上传失败，跳过请求")
+        else:
+            messages = [{"role": "user", "parts": parts}]
+            async for part in api.chat(messages, stream=False):
+                print("媒体总结:", part)
+            print("更新后的消息列表：", messages)
+    except FileNotFoundError as e:
+        print(f"文件不存在: {e}")
+    print()
+
+    # 示例 13：使用多个内联 Base64 图像生成描述（非流式）
+    print("示例 13：使用多个内联 Base64 图像生成描述（非流式）")
+    try:
+        image_files = ["《Break the Cocoon》封面.jpg", "ComfyUI_temp_poxuo_00001_.png"]  # 请替换为实际小图像路径（<10MB）
+        inline_data_list = await api.prepare_inline_data_batch(image_files)
+        parts = [{"text": "描述这些图片中的内容。"}]
+        for inline_data in inline_data_list:
+            if inline_data.get("inlineData"):
+                parts.append(inline_data)
+            else:
+                print(f"内联数据处理失败: {inline_data['error']}")
+        messages = [{"role": "user", "parts": parts}]
+        async for part in api.chat(messages, stream=False):
+            print("多内联图像描述:", part)
+        print("更新后的消息列表：", messages)
+    except FileNotFoundError as e:
+        print(f"文件不存在: {e}")
+    except ValueError as e:
+        print(f"内联数据错误: {e}")
+    print()
+
+    # 示例 14：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）
+    print("示例 14：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）")
+    try:
+        text_files = ["requirements.txt"]  # 请替换为实际文本文件路径
+        image_files = ["《Break the Cocoon》封面.jpg", "ComfyUI_temp_poxuo_00001_.png"]  # 请替换为实际小图像路径（<10MB）
+        file_data_list = await api.upload_files(text_files, display_names=["Sample Text"])
+        inline_data_list = await api.prepare_inline_data_batch(image_files)
+        parts = [{"text": "根据上传的文本文件总结内容，并描述旁边的图片。"}]
+        for file_data in file_data_list:
+            if file_data["fileUri"]:
+                parts.append({"fileData": {"fileUri": file_data["fileUri"], "mimeType": file_data["mimeType"]}})
+            else:
+                print(f"文件上传失败: {file_data['error']}")
+        for inline_data in inline_data_list:
+            if inline_data.get("inlineData"):
+                parts.append(inline_data)
+            else:
+                print(f"内联数据处理失败: {inline_data['error']}")
+        if not any("fileData" in part or "inlineData" in part for part in parts[1:]):
+            print("所有文件和内联数据处理失败，跳过请求")
+        else:
+            messages = [{"role": "user", "parts": parts}]
+            async for part in api.chat(messages, stream=False):
+                print("混合内容输出:", part)
+            print("更新后的消息列表：", messages)
+    except FileNotFoundError as e:
+        print(f"文件不存在: {e}")
+    except ValueError as e:
+        print(f"内联数据错误: {e}")
     print()
 
 if __name__ == "__main__":
