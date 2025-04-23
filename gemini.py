@@ -146,16 +146,16 @@ class GeminiAPI:
             body["generationConfig"] = generation_config
 
         endpoint = f"/models/{self.model}:{'streamGenerateContent' if stream else 'generateContent'}"
-        #logger.info(f"请求端点: {endpoint}")
-        #logger.debug(f"请求体: {json.dumps(body, ensure_ascii=False, indent=2)}")
+        logger.info(f"请求端点: {endpoint}")
+        logger.debug(f"请求体: {json.dumps(body, ensure_ascii=False, indent=2)}")
 
         if stream:
             async with self.client.stream("POST", endpoint, json=body, params={'alt': 'sse'}) as response:
-                #logger.info(f"流式响应状态: {response.status_code}")
+                logger.info(f"流式响应状态: {response.status_code}")
                 response.raise_for_status()
                 model_message = {"role": "model", "parts": []}
                 async for line in response.aiter_lines():
-                    #logger.debug(f"原始流式响应行: {line}")
+                    logger.debug(f"原始流式响应行: {line}")
                     if line.startswith("data: "):
                         data = line[len("data: "):].strip()
                         if data:
@@ -172,7 +172,7 @@ class GeminiAPI:
                                             function_responses = await self._execute_tool(function_calls, tools)
                                             api_contents.append(model_message)
                                             api_contents.extend(function_responses)
-                                            #logger.debug(f"流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
+                                            logger.debug(f"流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
                                             async for text in self._chat_api(
                                                 api_contents, stream=False, tools=tools,
                                                 max_output_tokens=max_output_tokens,
@@ -188,10 +188,10 @@ class GeminiAPI:
             for attempt in range(retries):
                 try:
                     response = await self.client.post(endpoint, json=body)
-                    #logger.info(f"非流式响应状态: {response.status_code}")
+                    logger.info(f"非流式响应状态: {response.status_code}")
                     response.raise_for_status()
                     result = response.json()
-                    #logger.debug(f"非流式响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
+                    logger.debug(f"非流式响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     candidate = result["candidates"][0]
                     model_message = {
                         "role": candidate["content"]["role"],
@@ -200,10 +200,10 @@ class GeminiAPI:
                     api_contents.append(model_message)
                     function_calls = [part["functionCall"] for part in candidate["content"]["parts"] if "functionCall" in part]
                     if function_calls:
-                        #logger.info(f"发现函数调用: {function_calls}")
+                        logger.info(f"发现函数调用: {function_calls}")
                         function_responses = await self._execute_tool(function_calls, tools)
                         api_contents.extend(function_responses)
-                        #logger.debug(f"非流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
+                        logger.debug(f"非流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
                         async for text in self._chat_api(
                             api_contents, stream=False, tools=tools,
                             max_output_tokens=max_output_tokens,
@@ -292,7 +292,7 @@ async def get_time(city: str) -> str:
 
 # 主函数
 async def main():
-    api = GeminiAPI(apikey="")  # 请替换为你的实际 API 密钥
+    api = GeminiAPI(apikey="YOUR_API_KEY")  # 请替换为你的实际 API 密钥
     tools = {
         "schedule_meeting": schedule_meeting,
         "get_weather": get_weather,
