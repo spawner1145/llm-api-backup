@@ -76,8 +76,8 @@ class GeminiAPI:
         for function_call in function_calls:
             name = function_call["name"]
             args = function_call.get("args", {})
-            func = tools.get(name)
             logger.info(f"执行工具调用: {name}, 参数: {args}")
+            func = tools.get(name)
             if func:
                 try:
                     if asyncio.iscoroutinefunction(func):
@@ -115,11 +115,9 @@ class GeminiAPI:
         if tools:
             function_declarations = []
             for name, func in tools.items():
-                # 修复参数解析逻辑
                 params = []
                 if hasattr(func, "__code__"):
                     params = func.__code__.co_varnames[:func.__code__.co_argcount]
-                    logger.debug(f"函数 {name} 的参数: {params}")
                 else:
                     logger.warning(f"函数 {name} 没有 __code__ 属性，使用空参数列表")
                 parameters = {
@@ -147,7 +145,6 @@ class GeminiAPI:
 
         endpoint = f"/models/{self.model}:{'streamGenerateContent' if stream else 'generateContent'}"
         logger.info(f"请求端点: {endpoint}")
-        logger.debug(f"请求体: {json.dumps(body, ensure_ascii=False, indent=2)}")
 
         if stream:
             async with self.client.stream("POST", endpoint, json=body, params={'alt': 'sse'}) as response:
@@ -155,7 +152,6 @@ class GeminiAPI:
                 response.raise_for_status()
                 model_message = {"role": "model", "parts": []}
                 async for line in response.aiter_lines():
-                    logger.debug(f"原始流式响应行: {line}")
                     if line.startswith("data: "):
                         data = line[len("data: "):].strip()
                         if data:
@@ -172,7 +168,6 @@ class GeminiAPI:
                                             function_responses = await self._execute_tool(function_calls, tools)
                                             api_contents.append(model_message)
                                             api_contents.extend(function_responses)
-                                            logger.debug(f"流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
                                             async for text in self._chat_api(
                                                 api_contents, stream=False, tools=tools,
                                                 max_output_tokens=max_output_tokens,
@@ -191,7 +186,6 @@ class GeminiAPI:
                     logger.info(f"非流式响应状态: {response.status_code}")
                     response.raise_for_status()
                     result = response.json()
-                    logger.debug(f"非流式响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     candidate = result["candidates"][0]
                     model_message = {
                         "role": candidate["content"]["role"],
@@ -203,7 +197,6 @@ class GeminiAPI:
                         logger.info(f"发现函数调用: {function_calls}")
                         function_responses = await self._execute_tool(function_calls, tools)
                         api_contents.extend(function_responses)
-                        logger.debug(f"非流式模式更新后的 api_contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
                         async for text in self._chat_api(
                             api_contents, stream=False, tools=tools,
                             max_output_tokens=max_output_tokens,
@@ -256,7 +249,7 @@ class GeminiAPI:
             parts = [{"text": p} if isinstance(p, str) else p for p in msg["parts"]]
             api_contents.append({"role": role, "parts": parts})
 
-        logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
+        #logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
 
         full_text = ""
         async for part in self._chat_api(
@@ -292,7 +285,7 @@ async def get_time(city: str) -> str:
 
 # 主函数
 async def main():
-    api = GeminiAPI(apikey="YOUR_API_KEY")  # 请替换为你的实际 API 密钥
+    api = GeminiAPI(apikey="")  # 请替换为你的实际 API 密钥
     tools = {
         "schedule_meeting": schedule_meeting,
         "get_weather": get_weather,
