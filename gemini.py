@@ -15,7 +15,7 @@ class GeminiAPI:
         self,
         apikey: str,
         baseurl: str = "https://generativelanguage.googleapis.com/v1beta",
-        model: str = "gemini-2.0-flash-001",
+        model: str = "gemini-2.0-flash",
         proxy: Optional[str] = None
     ):
         self.apikey = apikey
@@ -108,9 +108,50 @@ class GeminiAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
+        thinking_budget: Optional[int] = None,
+        topk: Optional[int] = None,
+        candidate_count: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        stop_sequences: Optional[List[str]] = None,
+        response_mime_type: Optional[str] = None,
+        response_schema: Optional[Dict] = None,
+        seed: Optional[int] = None,
+        response_logprobs: Optional[bool] = None,
+        logprobs: Optional[int] = None,
+        audio_timestamp: Optional[bool] = None,
+        safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
-    ) -> AsyncGenerator[str, None]:
-        """核心 API 调用逻辑"""
+    ) -> AsyncGenerator[Union[str, Dict], None]:
+        """核心 API 调用逻辑，支持所有 Gemini 模型参数"""
+        # 验证 thinking_budget 和 enable_thinking
+        enable_thinking = thinking_budget is not None and thinking_budget > 0
+        if thinking_budget is not None:
+            if not isinstance(thinking_budget, int) or thinking_budget < 0 or thinking_budget > 24576:
+                raise ValueError("thinking_budget 必须是 0 到 24576 之间的整数")
+            if self.model not in ["gemini-2.5-flash", "gemini-2.5-pro"]:
+                logger.warning(f"模型 {self.model} 不支持 thinking_budget，已忽略该参数")
+                thinking_budget = None
+                enable_thinking = False
+
+        # 验证其他参数
+        if topp is not None and (topp < 0 or topp > 1):
+            raise ValueError("topP 必须在 0 到 1 之间")
+        if temperature is not None and (temperature < 0 or temperature > 2):
+            raise ValueError("temperature 必须在 0 到 2 之间")
+        if topk is not None and topk < 1:
+            raise ValueError("topK 必须是正整数")
+        if candidate_count is not None and (candidate_count < 1 or candidate_count > 8):
+            raise ValueError("candidateCount 必须在 1 到 8 之间")
+        if presence_penalty is not None and (presence_penalty < -2 or presence_penalty > 2):
+            raise ValueError("presencePenalty 必须在 -2 到 2 之间")
+        if frequency_penalty is not None and (frequency_penalty < -2 or frequency_penalty > 2):
+            raise ValueError("frequencyPenalty 必须在 -2 到 2 之间")
+        if response_mime_type is not None and response_mime_type not in ["text/plain", "application/json"]:
+            raise ValueError("responseMimeType 必须是 'text/plain' 或 'application/json'")
+        if logprobs is not None and (logprobs < 0 or logprobs > 5):
+            raise ValueError("logprobs 必须在 0 到 5 之间")
+
         body = {"contents": api_contents}
         if tools:
             function_declarations = []
@@ -133,6 +174,9 @@ class GeminiAPI:
             body["tools"] = [{"functionDeclarations": function_declarations}]
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        if safety_settings:
+            body["safetySettings"] = safety_settings
+
         generation_config = {}
         if max_output_tokens:
             generation_config["maxOutputTokens"] = max_output_tokens
@@ -140,6 +184,34 @@ class GeminiAPI:
             generation_config["topP"] = topp
         if temperature:
             generation_config["temperature"] = temperature
+        if topk:
+            generation_config["topK"] = topk
+        if candidate_count:
+            generation_config["candidateCount"] = candidate_count
+        if presence_penalty:
+            generation_config["presencePenalty"] = presence_penalty
+        if frequency_penalty:
+            generation_config["frequencyPenalty"] = frequency_penalty
+        if stop_sequences:
+            generation_config["stopSequences"] = stop_sequences
+        if response_mime_type:
+            generation_config["responseMimeType"] = response_mime_type
+        if response_schema:
+            generation_config["responseSchema"] = response_schema
+        if seed:
+            generation_config["seed"] = seed
+        if response_logprobs is not None:
+            generation_config["responseLogprobs"] = response_logprobs
+        if logprobs is not None:
+            generation_config["logprobs"] = logprobs
+        if audio_timestamp is not None:
+            generation_config["audioTimestamp"] = audio_timestamp
+        if enable_thinking or thinking_budget is not None:
+            generation_config["thinkingConfig"] = {
+                "enableThinking": enable_thinking,
+                "thinkingBudget": thinking_budget if thinking_budget is not None else 8192
+            }
+
         if generation_config:
             body["generationConfig"] = generation_config
 
@@ -149,7 +221,13 @@ class GeminiAPI:
         if stream:
             async with self.client.stream("POST", endpoint, json=body, params={'alt': 'sse'}) as response:
                 logger.info(f"流式响应状态: {response.status_code}")
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"流式 HTTP 错误: {e}")
+                    logger.error(f"失败的请求体: {json.dumps(body, ensure_ascii=False, indent=2)}")
+                    logger.error(f"服务器响应: {await response.aread()}")
+                    raise
                 model_message = {"role": "model", "parts": []}
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
@@ -162,6 +240,9 @@ class GeminiAPI:
                                         if "text" in part:
                                             model_message["parts"].append({"text": part["text"]})
                                             yield part["text"]
+                                        elif "thoughts" in part and enable_thinking:
+                                            model_message["parts"].append({"thoughts": part["thoughts"]})
+                                            yield {"thoughts": part["thoughts"]}
                                         elif "functionCall" in part and tools:
                                             model_message["parts"].append({"functionCall": part["functionCall"]})
                                             function_calls = [part["functionCall"]]
@@ -172,7 +253,18 @@ class GeminiAPI:
                                                 api_contents, stream=False, tools=tools,
                                                 max_output_tokens=max_output_tokens,
                                                 system_instruction=system_instruction,
-                                                topp=topp, temperature=temperature, retries=retries
+                                                topp=topp, temperature=temperature,
+                                                thinking_budget=thinking_budget,
+                                                topk=topk, candidate_count=candidate_count,
+                                                presence_penalty=presence_penalty,
+                                                frequency_penalty=frequency_penalty,
+                                                stop_sequences=stop_sequences,
+                                                response_mime_type=response_mime_type,
+                                                response_schema=response_schema,
+                                                seed=seed, response_logprobs=response_logprobs,
+                                                logprobs=logprobs, audio_timestamp=audio_timestamp,
+                                                safety_settings=safety_settings,
+                                                retries=retries
                                             ):
                                                 yield text
                             except json.JSONDecodeError as e:
@@ -201,12 +293,33 @@ class GeminiAPI:
                             api_contents, stream=False, tools=tools,
                             max_output_tokens=max_output_tokens,
                             system_instruction=system_instruction,
-                            topp=topp, temperature=temperature, retries=retries
+                            topp=topp, temperature=temperature,
+                            thinking_budget=thinking_budget,
+                            topk=topk, candidate_count=candidate_count,
+                            presence_penalty=presence_penalty,
+                            frequency_penalty=frequency_penalty,
+                            stop_sequences=stop_sequences,
+                            response_mime_type=response_mime_type,
+                            response_schema=response_schema,
+                            seed=seed, response_logprobs=response_logprobs,
+                            logprobs=logprobs, audio_timestamp=audio_timestamp,
+                            safety_settings=safety_settings,
+                            retries=retries
                         ):
                             yield text
                     else:
-                        text = "".join(part["text"] for part in candidate["content"]["parts"] if "text" in part)
-                        yield text
+                        parts = candidate["content"]["parts"]
+                        thoughts = [part["thoughts"] for part in parts if "thoughts" in part and enable_thinking]
+                        text = "".join(part["text"] for part in parts if "text" in part)
+                        logprobs_data = candidate.get("logprobs", []) if response_logprobs else []
+                        if thoughts or logprobs_data:
+                            yield {
+                                "thoughts": thoughts if thoughts else None,
+                                "text": text,
+                                "logprobs": logprobs_data
+                            }
+                        else:
+                            yield text
                     break
                 except httpx.HTTPStatusError as e:
                     logger.error(f"HTTP 错误 (尝试 {attempt+1}/{retries}): {e}")
@@ -234,9 +347,22 @@ class GeminiAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
+        thinking_budget: Optional[int] = None,
+        topk: Optional[int] = None,
+        candidate_count: Optional[int] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        stop_sequences: Optional[List[str]] = None,
+        response_mime_type: Optional[str] = None,
+        response_schema: Optional[Dict] = None,
+        seed: Optional[int] = None,
+        response_logprobs: Optional[bool] = None,
+        logprobs: Optional[int] = None,
+        audio_timestamp: Optional[bool] = None,
+        safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
-    ) -> AsyncGenerator[Union[str, List[Dict[str, any]]], None]:
-        """发起聊天请求"""
+    ) -> AsyncGenerator[Union[str, Dict, List[Dict[str, any]]], None]:
+        """发起聊天请求，支持所有 Gemini 模型参数,见https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini?hl=zh-cn"""
         if isinstance(messages, str):
             messages = [{"role": "user", "parts": [messages]}]
             use_history = False
@@ -252,16 +378,38 @@ class GeminiAPI:
         #logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
 
         full_text = ""
+        thoughts = []
+        logprobs_data = []
         async for part in self._chat_api(
             api_contents, stream, tools, max_output_tokens,
-            system_instruction, topp, temperature, retries
+            system_instruction, topp, temperature, thinking_budget,
+            topk, candidate_count, presence_penalty, frequency_penalty,
+            stop_sequences, response_mime_type, response_schema,
+            seed, response_logprobs, logprobs, audio_timestamp,
+            safety_settings, retries
         ):
-            yield part
-            if use_history:
+            if isinstance(part, dict):
+                if "thoughts" in part and part["thoughts"]:
+                    thoughts.extend(part["thoughts"] if isinstance(part["thoughts"], list) else [part["thoughts"]])
+                if "logprobs" in part and part["logprobs"]:
+                    logprobs_data.extend(part["logprobs"])
+                full_text += part["text"]
+                yield part
+            else:
                 full_text += part
+                yield part
 
         if use_history and full_text:
-            messages.append({"role": "assistant", "parts": [full_text]})
+            if thoughts or logprobs_data:
+                parts = []
+                if thoughts:
+                    parts.append({"thoughts": thoughts})
+                parts.append({"text": full_text})
+                if logprobs_data:
+                    parts.append({"logprobs": logprobs_data})
+                messages.append({"role": "assistant", "parts": parts})
+            else:
+                messages.append({"role": "assistant", "parts": [full_text]})
             logger.info(f"最终消息列表: {json.dumps(messages, ensure_ascii=False, indent=2)}")
 
     async def __aenter__(self):
@@ -316,8 +464,8 @@ async def main():
         print(part, end="", flush=True)
     print("\n")
 
-    # 示例 4：多轮对话（流式）
-    print("示例 4：多轮对话（流式）")
+    # 示例 4：多轮对话（流式，带工具）
+    print("示例 4：多轮对话（流式，带工具）")
     messages = [
         {"role": "user", "parts": ["你好！"]},
         {"role": "assistant", "parts": ["你好！有什么可以帮助你的？"]},
@@ -336,6 +484,66 @@ async def main():
     async for part in api.chat(messages, stream=False, tools=tools):
         print(part)
     print("更新后的消息列表：", messages)
+    print()
+
+    # 示例 6：思考模式（非流式，启用思考）
+    print("示例 6：思考模式（非流式，启用思考）")
+    messages = [
+        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+    ]
+    async for part in api.chat(messages, stream=False, thinking_budget=24576):
+        if isinstance(part, dict):
+            print("思考过程:", part["thoughts"])
+            print("最终回答:", part["text"])
+            if part["logprobs"]:
+                print("Logprobs:", part["logprobs"])
+        else:
+            print(part)
+    print("更新后的消息列表：", messages)
+    print()
+
+    # 示例 7：思考模式（流式，启用思考）
+    print("示例 7：思考模式（流式，启用思考）")
+    messages = [
+        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+    ]
+    async for part in api.chat(messages, stream=True, thinking_budget=24576):
+        if isinstance(part, dict) and "thoughts" in part:
+            print("思考过程:", part["thoughts"])
+        else:
+            print("流式输出:", part, end="", flush=True)
+    print("\n更新后的消息列表：", messages)
+    print()
+
+    # 示例 8：思考模式（非流式，禁用思考）
+    print("示例 8：思考模式（非流式，禁用思考）")
+    messages = [
+        {"role": "user", "parts": ["解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"]}
+    ]
+    async for part in api.chat(messages, stream=False, thinking_budget=0):
+        print("最终回答:", part)
+    print("更新后的消息列表：", messages)
+    print()
+
+    # 示例 9：结构化输出（非流式，使用 response_schema）
+    print("示例 9：结构化输出（非流式，使用 response_schema）")
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        },
+        "required": ["name", "age"]
+    }
+    messages = [
+        {"role": "user", "parts": ["请提供一个人的信息，包括姓名和年龄。"]}
+    ]
+    async for part in api.chat(
+        messages, stream=False, response_mime_type="application/json", response_schema=schema
+    ):
+        print("结构化输出:", part)
+    print("更新后的消息列表：", messages)
+    print()
 
 if __name__ == "__main__":
     asyncio.run(main())
