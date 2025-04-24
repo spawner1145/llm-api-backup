@@ -134,7 +134,7 @@ class OpenAIAPI:
         tool_calls: List[Dict],
         tools: Dict[str, Callable]
     ) -> List[Dict]:
-        """执行工具调用并返回响应，兼容 OpenAI 和 Gemini 格式"""
+        """执行工具调用并返回响应，遵循 OpenAI 格式"""
         tool_responses = []
         for tool_call in tool_calls:
             name = tool_call.function.name
@@ -143,7 +143,7 @@ class OpenAIAPI:
                 continue
             # 统一 tool_call_id
             tool_call_id = getattr(tool_call, 'id', None)
-            if not tool_call_id:
+            if not tool_call_id or tool_call_id == "":
                 tool_call_id = f"call_{uuid.uuid4()}"
                 logger.warning(f"工具调用缺少 ID，使用临时 ID: {tool_call_id}")
             args = json.loads(tool_call.function.arguments)
@@ -158,7 +158,7 @@ class OpenAIAPI:
                     logger.info(f"工具结果: {name} 返回 {result}, ID: {tool_call_id}")
                     tool_response = {
                         "role": "tool",
-                        "content": json.dumps({"result": str(result)}),
+                        "content": str(result),  # 确保结果是字符串
                         "tool_call_id": tool_call_id
                     }
                     logger.debug(f"生成工具响应: {json.dumps(tool_response, ensure_ascii=False)}")
@@ -168,7 +168,7 @@ class OpenAIAPI:
                     logger.error(f"工具错误: {result}, ID: {tool_call_id}")
                     tool_response = {
                         "role": "tool",
-                        "content": json.dumps({"error": str(result)}),
+                        "content": str(result),
                         "tool_call_id": tool_call_id
                     }
                     logger.debug(f"生成工具错误响应: {json.dumps(tool_response, ensure_ascii=False)}")
@@ -177,7 +177,7 @@ class OpenAIAPI:
                 logger.error(f"未找到工具: {name}, ID: {tool_call_id}")
                 tool_response = {
                     "role": "tool",
-                    "content": json.dumps({"error": f"未找到工具 {name}"}),
+                    "content": f"未找到工具 {name}",
                     "tool_call_id": tool_call_id
                 }
                 logger.debug(f"生成工具未找到响应: {json.dumps(tool_response, ensure_ascii=False)}")
@@ -208,7 +208,7 @@ class OpenAIAPI:
         safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
     ) -> AsyncGenerator[str, None]:
-        """核心 API 调用逻辑，遵循 OpenAI 标准，兼容 Gemini 端点"""
+        """核心 API 调用逻辑，遵循 OpenAI 标准，适配 Gemini 响应格式"""
         original_model = self.model
 
         # 验证参数
@@ -255,8 +255,6 @@ class OpenAIAPI:
                 ]
             if "tool_call_id" in msg:
                 api_msg["tool_call_id"] = msg["tool_call_id"]
-            if "parts" in msg:  # Gemini 格式
-                api_msg["parts"] = msg["parts"]
             logger.debug(f"构造消息: {json.dumps(api_msg, ensure_ascii=False)}")
             api_messages.append(api_msg)
 
@@ -298,7 +296,8 @@ class OpenAIAPI:
                 params = {
                     "type": "object",
                     "properties": {},
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
                 if hasattr(func, "__code__"):
                     param_names = func.__code__.co_varnames[:func.__code__.co_argcount]
@@ -313,7 +312,8 @@ class OpenAIAPI:
                     "function": {
                         "name": name,
                         "description": getattr(func, "__doc__", f"调用 {name} 函数"),
-                        "parameters": params
+                        "parameters": params,
+                        "strict": True
                     }
                 })
             request_params["tools"] = tool_definitions
@@ -324,111 +324,90 @@ class OpenAIAPI:
         # 执行请求
         if stream:
             tool_calls_buffer = []
-            tool_call_ids = {}
-            tool_call_args = {}
             async for chunk in await self.client.chat.completions.create(**request_params):
+                logger.info(f"流式原始响应体分片: {json.dumps(chunk.dict(), ensure_ascii=False, indent=2)}")
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta.content:
                         yield delta.content
                     elif delta.tool_calls:
                         for tool_call in delta.tool_calls:
-                            if tool_call and tool_call.index is not None:
-                                # 统一 tool_call_id
+                            if tool_call and tool_call.function:
+                                # 为每个工具调用生成唯一的 tool_call_id
                                 tool_call_id = tool_call.id if tool_call.id else f"call_{uuid.uuid4()}"
-                                tool_call_ids[tool_call.index] = tool_call_id
-                                # 初始化工具调用
-                                if tool_call.index not in tool_call_args:
-                                    tool_call_args[tool_call.index] = {
-                                        "name": tool_call.function.name if tool_call.function else "",
-                                        "arguments": tool_call.function.arguments or "" if tool_call.function else "",
-                                        "id": tool_call_id
-                                    }
-                                    logger.info(f"工具调用初始化: {tool_call_args[tool_call.index]['name']} (ID: {tool_call_id})")
-                                # 累积 arguments
-                                if tool_call.function and tool_call.function.arguments:
-                                    tool_call_args[tool_call.index]["arguments"] += tool_call.function.arguments
-                                    logger.debug(f"参数分片: {tool_call.function.arguments}, ID: {tool_call_id}")
-                        # 当流式完成时，构造 tool_calls_buffer
-                        if chunk.choices[0].finish_reason == "tool_calls":
-                            if tool_call_args:
-                                for index, args in tool_call_args.items():
-                                    tool_call_id = tool_call_ids.get(index, f"call_{uuid.uuid4()}")
-                                    try:
-                                        # 验证 arguments 是否为有效 JSON
-                                        json.loads(args["arguments"])
-                                        tool_calls_buffer.append({
-                                            "id": tool_call_id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": args["name"],
-                                                "arguments": args["arguments"]
-                                            }
-                                        })
-                                        logger.info(f"参数完成: {args['arguments']}, ID: {tool_call_id}")
-                                        logger.info(f"工具调用完成: {args['name']}, ID: {tool_call_id}")
-                                    except json.JSONDecodeError:
-                                        logger.error(f"工具调用 {args['name']} 的 arguments 无效: {args['arguments']}, ID: {tool_call_id}")
-                                        continue
-                                if tool_calls_buffer:
-                                    # 追加 assistant 消息到 api_messages 和 messages
-                                    assistant_message = {
-                                        "role": "assistant",
-                                        "content": "Calling tools",
-                                        "tool_calls": tool_calls_buffer
-                                    }
-                                    api_messages.append(assistant_message)
-                                    messages.append(assistant_message)
-                                    logger.debug(f"追加 assistant 消息: {json.dumps(assistant_message, ensure_ascii=False)}")
-                                    # 执行工具调用
-                                    tool_responses = await self._execute_tool(
-                                        [
-                                            type('ToolCall', (), {
-                                                'function': type('Function', (), {
-                                                    'name': tc["function"]["name"],
-                                                    'arguments': tc["function"]["arguments"]
-                                                })(),
-                                                'id': tc["id"]
-                                            })() for tc in tool_calls_buffer
-                                        ],
-                                        tools
-                                    )
-                                    for tool_response, tool_call_id in tool_responses:
-                                        tool_message = {
-                                            "role": "tool",
-                                            "content": tool_response.get("content", json.dumps(tool_response["parts"][0]["function_response"]["response"])),
-                                            "tool_call_id": tool_call_id
+                                try:
+                                    # 验证 arguments 是否为有效 JSON
+                                    arguments = tool_call.function.arguments or "{}"
+                                    json.loads(arguments)
+                                    tool_calls_buffer.append({
+                                        "id": tool_call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_call.function.name,
+                                            "arguments": arguments
                                         }
-                                        api_messages.append(tool_message)
-                                        messages.append(tool_message)
-                                    logger.debug(f"追加工具响应后的消息: {json.dumps(api_messages, ensure_ascii=False, indent=2)}")
-                                    # 打印第二次请求的 POST 请求体
-                                    second_request_params = request_params.copy()
-                                    second_request_params["messages"] = api_messages
-                                    second_request_params["stream"] = False
-                                    logger.info(f"第二次 POST 请求体: {json.dumps(second_request_params, ensure_ascii=False, indent=2)}")
-                                    # 发起第二次请求
-                                    async for part in self._chat_api(
-                                        api_messages, stream=False, tools=tools,
-                                        max_output_tokens=max_output_tokens,
-                                        system_instruction=system_instruction,
-                                        topp=topp, temperature=temperature,
-                                        thinking_budget=thinking_budget,
-                                        presence_penalty=presence_penalty,
-                                        frequency_penalty=frequency_penalty,
-                                        stop_sequences=stop_sequences,
-                                        response_mime_type=response_mime_type,
-                                        response_schema=response_schema,
-                                        seed=seed,
-                                        response_logprobs=response_logprobs,
-                                        logprobs=logprobs,
-                                        retries=retries
-                                    ):
-                                        yield part
+                                    })
+                                    logger.info(f"工具调用: {tool_call.function.name}, 参数: {arguments}, ID: {tool_call_id}")
+                                except json.JSONDecodeError:
+                                    logger.error(f"工具调用 {tool_call.function.name} 的 arguments 无效: {arguments}, ID: {tool_call_id}")
+                                    continue
+                        # 当流式完成时，处理所有工具调用
+                        if chunk.choices[0].finish_reason == "tool_calls" and tool_calls_buffer:
+                            # 追加 assistant 消息到 api_messages 和 messages
+                            assistant_message = {
+                                "role": "assistant",
+                                "content": "Tool calls executed",  # 为 Gemini API 设置默认 content
+                                "tool_calls": tool_calls_buffer
+                            }
+                            api_messages.append(assistant_message)
+                            messages.append(assistant_message)
+                            logger.debug(f"追加 assistant 消息: {json.dumps(assistant_message, ensure_ascii=False)}")
+                            # 执行工具调用
+                            tool_responses = await self._execute_tool(
+                                [
+                                    type('ToolCall', (), {
+                                        'function': type('Function', (), {
+                                            'name': tc["function"]["name"],
+                                            'arguments': tc["function"]["arguments"]
+                                        })(),
+                                        'id': tc["id"]
+                                    })() for tc in tool_calls_buffer
+                                ],
+                                tools
+                            )
+                            # 追加工具响应
+                            for tool_response, tool_call_id in tool_responses:
+                                tool_message = {
+                                    "role": "tool",
+                                    "content": tool_response["content"],
+                                    "tool_call_id": tool_call_id
+                                }
+                                api_messages.append(tool_message)
+                                messages.append(tool_message)
+                                logger.debug(f"追加工具响应: {json.dumps(tool_message, ensure_ascii=False)}")
+                            # 发起第二次请求（非流式）
+                            second_request_params = request_params.copy()
+                            second_request_params["messages"] = api_messages
+                            second_request_params["stream"] = False
+                            logger.info(f"第二次 POST 请求体: {json.dumps(second_request_params, ensure_ascii=False, indent=2)}")
+                            try:
+                                response = await self.client.chat.completions.create(**second_request_params)
+                                logger.info(f"第二次非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
+                                choice = response.choices[0]
+                                message = choice.message
+                                if message.content:
+                                    yield message.content
+                                    messages.append({"role": "assistant", "content": message.content})
+                            except Exception as e:
+                                logger.error(f"第二次 API 调用失败: {str(e)}")
+                                yield f"错误: 无法获取最终响应 - {str(e)}"
+                            # 清空 tool_calls_buffer 以处理可能的后续工具调用
+                            tool_calls_buffer = []
         else:
             for attempt in range(retries):
                 try:
                     response = await self.client.chat.completions.create(**request_params)
+                    logger.info(f"非流式原始响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
                     choice = response.choices[0]
                     message = choice.message
                     if message.tool_calls:
@@ -444,7 +423,7 @@ class OpenAIAPI:
                         ]
                         assistant_message = {
                             "role": "assistant",
-                            "content": message.content or "Calling tools",
+                            "content": "Tool calls executed",  # 为 Gemini API 设置默认 content
                             "tool_calls": tool_calls
                         }
                         api_messages.append(assistant_message)
@@ -454,7 +433,7 @@ class OpenAIAPI:
                         for tool_response, tool_call_id in tool_responses:
                             tool_message = {
                                 "role": "tool",
-                                "content": tool_response.get("content", json.dumps(tool_response["parts"][0]["function_response"]["response"])),
+                                "content": tool_response["content"],
                                 "tool_call_id": tool_call_id
                             }
                             api_messages.append(tool_message)
@@ -465,23 +444,13 @@ class OpenAIAPI:
                         second_request_params["messages"] = api_messages
                         second_request_params["stream"] = False
                         logger.info(f"第二次 POST 请求体: {json.dumps(second_request_params, ensure_ascii=False, indent=2)}")
-                        async for part in self._chat_api(
-                            api_messages, stream=False, tools=tools,
-                            max_output_tokens=max_output_tokens,
-                            system_instruction=system_instruction,
-                            topp=topp, temperature=temperature,
-                            thinking_budget=thinking_budget,
-                            presence_penalty=presence_penalty,
-                            frequency_penalty=frequency_penalty,
-                            stop_sequences=stop_sequences,
-                            response_mime_type=response_mime_type,
-                            response_schema=response_schema,
-                            seed=seed,
-                            response_logprobs=response_logprobs,
-                            logprobs=logprobs,
-                            retries=retries
-                        ):
-                            yield part
+                        response = await self.client.chat.completions.create(**second_request_params)
+                        logger.info(f"第二次非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
+                        choice = response.choices[0]
+                        message = choice.message
+                        if message.content:
+                            yield message.content
+                            messages.append({"role": "assistant", "content": message.content})
                     else:
                         if response_logprobs is not None and choice.logprobs:
                             yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
@@ -650,69 +619,6 @@ async def main():
         print("结构化输出:", part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
-
-    # 示例 8：测试 logprobs（非流式，仅限支持的模型，显式传入）
-    '''print("示例 8：测试 logprobs（非流式，仅限支持的模型，显式传入）")
-    api.model = "gemini-1.5-pro"  # 切换到支持 logprobs 的模型
-    messages = [
-        {"role": "user", "content": "法国的首都是哪里？"}
-    ]
-    async for part in api.chat(messages, stream=False, response_logprobs=True, logprobs=5):
-        print("带 logprobs 的输出:", part, end="", flush=True)
-    print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
-    api.model = "gemini-1.5-flash"  # 恢复默认模型
-    print()
-
-    # 示例 9：并行使用 File API 上传文件并生成描述（非流式）
-    print("示例 9：并行使用 File API 上传文件并生成描述（非流式）")
-    try:
-        files = ["doc1.txt"]  # 请替换为实际文件路径
-        file_data_list = await api.upload_files(files, display_names=["Doc 1"])
-        content = [{"type": "text", "text": "描述这些文件的内容（文件已上传，需预处理为文本）。"}]
-        for file_data in file_data_list:
-            if file_data["fileUri"]:
-                content.append({
-                    "type": "fileData",
-                    "fileData": {"fileUri": file_data["fileUri"], "mimeType": file_data["mimeType"]}
-                })
-            else:
-                print(f"文件上传失败: {file_data['error']}")
-        if not any(c["type"] == "fileData" for c in content[1:]):
-            print("所有文件上传失败，跳过请求")
-        else:
-            messages = [{"role": "user", "content": content}]
-            async for part in api.chat(messages, stream=False):
-                print("文件描述:", part, end="", flush=True)
-            print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
-    except FileNotFoundError as e:
-        print(f"文件不存在: {e}")
-    print()
-
-    # 示例 10：使用内联 Base64 文件生成描述（非流式）
-    print("示例 10：使用内联 Base64 文件生成描述（非流式）")
-    try:
-        files = ["image1.jpg"]  # 请替换为实际小文件路径（<10MB）
-        inline_data_list = await api.prepare_inline_data_batch(files)
-        content = [{"type": "text", "text": "描述这些文件中的内容。"}]
-        for inline_data in inline_data_list:
-            if inline_data.get("inlineData"):
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{inline_data['inlineData']['mimeType']};base64,{inline_data['inlineData']['data']}"
-                    }
-                })
-            else:
-                print(f"内联数据处理失败: {inline_data['error']}")
-        messages = [{"role": "user", "content": content}]
-        async for part in api.chat(messages, stream=False):
-            print("内联文件描述:", part, end="", flush=True)
-        print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
-    except FileNotFoundError as e:
-        print(f"文件不存在: {e}")
-    except ValueError as e:
-        print(f"内联数据错误: {e}")
-    print()'''
 
 if __name__ == "__main__":
     asyncio.run(main())
