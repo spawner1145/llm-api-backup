@@ -599,15 +599,6 @@ async def main():
         ]
         display_names = ["doc1.pdf", "doc2.pdf"]
 
-        # 写入简单 PDF 内容（模拟 PDF 文本）
-        async def create_temp_pdfs():
-            async with aiofiles.open(file_paths[0], 'w') as f:
-                await f.write("%PDF-1.4\n%% Simple PDF\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 44 >>\nstream\nBT /F1 12 Tf 100 700 Td (Project Plan: Define milestones) Tj ET\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF")
-            async with aiofiles.open(file_paths[1], 'w') as f:
-                await f.write("%PDF-1.4\n%% Simple PDF\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 50 >>\nstream\nBT /F1 12 Tf 100 700 Td (Budget: $5000 for marketing) Tj ET\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF")
-
-        await create_temp_pdfs()
-
         # 上传文件
         upload_results = await api.upload_files(file_paths, display_names)
         file_parts = []
