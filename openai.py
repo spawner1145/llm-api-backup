@@ -19,8 +19,8 @@ class OpenAIAPI:
     def __init__(
         self,
         apikey: str,
-        baseurl: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
-        model: str = "gemini-2.0-flash-001",
+        baseurl: str = "https://api.openai.com/v1",
+        model: str = "gpt-4o",
         proxy: Optional[str] = None
     ):
         self.apikey = apikey
