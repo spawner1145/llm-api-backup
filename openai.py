@@ -8,6 +8,7 @@ import uuid
 from typing import AsyncGenerator, Dict, List, Optional, Union, Callable
 import aiofiles
 import logging
+import tempfile
 from openai import AsyncOpenAI
 
 # 配置日志
@@ -18,8 +19,8 @@ class OpenAIAPI:
     def __init__(
         self,
         apikey: str,
-        baseurl: str = "https://api.openai.com/v1",
-        model: str = "gpt-4o",
+        baseurl: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
+        model: str = "gemini-2.0-flash-001",
         proxy: Optional[str] = None
     ):
         self.apikey = apikey
@@ -32,14 +33,14 @@ class OpenAIAPI:
         )
 
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
-        """上传单个文件，使用 client.files.create"""
+        """上传单个文件，使用 client.files.create，目的为 user_data"""
         try:
             file_size = os.path.getsize(file_path)
-            if file_size > 2 * 1024 * 1024 * 1024:  # 2GB 限制
-                raise ValueError(f"文件 {file_path} 大小超过 2GB 限制")
+            if file_size > 32 * 1024 * 1024:  # 32MB 限制
+                raise ValueError(f"文件 {file_path} 大小超过 32MB 限制")
         except FileNotFoundError:
             logger.error(f"文件 {file_path} 不存在")
-            return {"fileUri": None, "mimeType": None, "error": f"文件 {file_path} 不存在"}
+            return {"fileId": None, "mimeType": None, "error": f"文件 {file_path} 不存在"}
 
         mime_type, _ = mimetypes.guess_type(file_path)
         if not mime_type:
@@ -47,26 +48,23 @@ class OpenAIAPI:
             logger.warning(f"无法检测文件 {file_path} 的 MIME 类型，使用默认值: {mime_type}")
 
         supported_mime_types = [
-            "image/jpeg", "image/png", "image/gif", "image/webp",
-            "text/plain", "text/markdown", "application/pdf",
-            "audio/mpeg", "audio/wav", "video/mp4"
+            "application/pdf", "image/jpeg", "image/png", "image/webp", "image/gif"
         ]
         if mime_type not in supported_mime_types:
             logger.warning(f"MIME 类型 {mime_type} 可能不受支持，可能导致处理失败")
 
         try:
             async with aiofiles.open(file_path, 'rb') as f:
-                file_content = await f.read()
                 file = await self.client.files.create(
-                    file=(display_name or os.path.basename(file_path), file_content, mime_type),
-                    purpose="assistants"
+                    file=(display_name or os.path.basename(file_path), await f.read(), mime_type),
+                    purpose="user_data"
                 )
-                file_uri = file.id
-                logger.info(f"文件 {file_path} 上传成功，URI: {file_uri}")
-                return {"fileUri": file_uri, "mimeType": mime_type, "error": None}
+                file_id = file.id
+                logger.info(f"文件 {file_path} 上传成功，ID: {file_id}")
+                return {"fileId": file_id, "mimeType": mime_type, "error": None}
         except Exception as e:
             logger.error(f"文件 {file_path} 上传失败: {str(e)}")
-            return {"fileUri": None, "mimeType": mime_type, "error": str(e)}
+            return {"fileId": None, "mimeType": mime_type, "error": str(e)}
 
     async def upload_files(self, file_paths: List[str], display_names: Optional[List[str]] = None) -> List[Dict[str, Union[str, None]]]:
         """并行上传多个文件"""
@@ -82,51 +80,45 @@ class OpenAIAPI:
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"上传文件 {file_paths[idx]} 失败: {str(result)}")
-                final_results.append({"fileUri": None, "mimeType": None, "error": str(result)})
+                final_results.append({"fileId": None, "mimeType": None, "error": str(result)})
             else:
                 final_results.append(result)
         return final_results
 
-    async def prepare_inline_data(self, file_path: str) -> Dict[str, Dict[str, str]]:
-        """将单个小文件转换为 Base64 编码的 inlineData"""
+    async def prepare_inline_image(self, file_path: str, detail: str = "auto") -> Dict[str, Union[Dict, None]]:
+        """将单个图片转换为 Base64 编码的 input_image"""
         file_size = os.path.getsize(file_path)
-        if file_size * 4 / 3 > 20 * 1024 * 1024:  # Base64 编码后大小限制 20MB
-            raise ValueError(f"文件 {file_path} 过大，无法作为 inlineData，建议使用 File API 上传")
+        if file_size > 20 * 1024 * 1024:  # 20MB 限制
+            raise ValueError(f"文件 {file_path} 过大，超过 20MB 限制")
 
         mime_type, _ = mimetypes.guess_type(file_path)
-        if not mime_type:
-            mime_type = "application/octet-stream"
-            logger.warning(f"无法检测文件 {file_path} 的 MIME 类型，使用默认值: {mime_type}")
+        if not mime_type or mime_type not in ["image/jpeg", "image/png", "image/webp", "image/gif"]:
+            mime_type = "image/jpeg"
+            logger.warning(f"无效图片 MIME 类型，使用默认值: {mime_type}")
 
-        async with aiofiles.open(file_path, 'rb') as f:
-            file_content = await f.read()
-        base64_data = base64.b64encode(file_content).decode('utf-8')
-        return {
-            "inlineData": {
-                "mimeType": mime_type,
-                "data": base64_data
+        try:
+            async with aiofiles.open(file_path, 'rb') as f:
+                file_content = await f.read()
+            base64_data = base64.b64encode(file_content).decode('utf-8')
+            return {
+                "input_image": {
+                    "image_url": f"data:{mime_type};base64,{base64_data}",
+                    "detail": detail
+                }
             }
-        }
+        except Exception as e:
+            logger.error(f"处理图片 {file_path} 失败: {str(e)}")
+            return {"input_image": None, "error": str(e)}
 
-    async def prepare_inline_data_batch(self, file_paths: List[str]) -> List[Dict[str, Union[Dict[str, str], None]]]:
-        """将多个小文件转换为 Base64 编码的 inlineData 列表"""
+    async def prepare_inline_image_batch(self, file_paths: List[str], detail: str = "auto") -> List[Dict[str, Union[Dict, None]]]:
+        """将多个图片转换为 Base64 编码的 input_image 列表"""
         if not file_paths:
             raise ValueError("文件路径列表不能为空")
 
-        total_size = 0
         results = []
         for file_path in file_paths:
-            try:
-                file_size = os.path.getsize(file_path)
-                encoded_size = file_size * 4 / 3
-                total_size += encoded_size
-                if total_size > 20 * 1024 * 1024:
-                    raise ValueError(f"文件 {file_path} 加入后总大小超过 20MB，无法作为 inlineData")
-                inline_data = await self.prepare_inline_data(file_path)
-                results.append(inline_data)
-            except Exception as e:
-                logger.error(f"处理文件 {file_path} 失败: {str(e)}")
-                results.append({"inlineData": None, "error": str(e)})
+            result = await self.prepare_inline_image(file_path, detail)
+            results.append(result)
         return results
 
     async def _execute_tool(
@@ -141,11 +133,7 @@ class OpenAIAPI:
             if not name:
                 logger.error(f"工具调用缺少名称: {tool_call}")
                 continue
-            # 统一 tool_call_id
-            tool_call_id = getattr(tool_call, 'id', None)
-            if not tool_call_id or tool_call_id == "":
-                tool_call_id = f"call_{uuid.uuid4()}"
-                logger.warning(f"工具调用缺少 ID，使用临时 ID: {tool_call_id}")
+            tool_call_id = tool_call.id or f"call_{uuid.uuid4()}"
             args = json.loads(tool_call.function.arguments)
             logger.info(f"执行工具调用: {name}, 参数: {args}, ID: {tool_call_id}")
             func = tools.get(name)
@@ -158,29 +146,26 @@ class OpenAIAPI:
                     logger.info(f"工具结果: {name} 返回 {result}, ID: {tool_call_id}")
                     tool_response = {
                         "role": "tool",
-                        "content": str(result),  # 确保结果是字符串
+                        "content": json.dumps(result),  # OpenAI 要求工具响应为 JSON 字符串
                         "tool_call_id": tool_call_id
                     }
-                    logger.debug(f"生成工具响应: {json.dumps(tool_response, ensure_ascii=False)}")
                     tool_responses.append((tool_response, tool_call_id))
                 except Exception as e:
                     result = f"函数 {name} 执行失败: {str(e)}"
                     logger.error(f"工具错误: {result}, ID: {tool_call_id}")
                     tool_response = {
                         "role": "tool",
-                        "content": str(result),
+                        "content": json.dumps({"error": result}),
                         "tool_call_id": tool_call_id
                     }
-                    logger.debug(f"生成工具错误响应: {json.dumps(tool_response, ensure_ascii=False)}")
                     tool_responses.append((tool_response, tool_call_id))
             else:
                 logger.error(f"未找到工具: {name}, ID: {tool_call_id}")
                 tool_response = {
                     "role": "tool",
-                    "content": f"未找到工具 {name}",
+                    "content": json.dumps({"error": f"未找到工具 {name}"}),
                     "tool_call_id": tool_call_id
                 }
-                logger.debug(f"生成工具未找到响应: {json.dumps(tool_response, ensure_ascii=False)}")
                 tool_responses.append((tool_response, tool_call_id))
         return tool_responses
 
@@ -193,22 +178,16 @@ class OpenAIAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
-        thinking_budget: Optional[int] = None,
-        topk: Optional[int] = None,
-        candidate_count: Optional[int] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         stop_sequences: Optional[List[str]] = None,
-        response_mime_type: Optional[str] = None,
-        response_schema: Optional[Dict] = None,
+        response_format: Optional[Dict] = None,
         seed: Optional[int] = None,
         response_logprobs: Optional[bool] = None,
         logprobs: Optional[int] = None,
-        audio_timestamp: Optional[bool] = None,
-        safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
     ) -> AsyncGenerator[str, None]:
-        """核心 API 调用逻辑，遵循 OpenAI 标准，适配 Gemini 响应格式"""
+        """核心 API 调用逻辑，遵循 OpenAI 标准"""
         original_model = self.model
 
         # 验证参数
@@ -229,18 +208,34 @@ class OpenAIAPI:
             role = msg["role"]
             content = msg.get("content", "")
             if isinstance(content, str):
-                content = content
+                api_content = [{"type": "text", "text": content}]
             elif isinstance(content, list):
-                content = [
-                    part["text"] if "text" in part else
-                    f"data:{part['inlineData']['mimeType']};base64,{part['inlineData']['data']}" if "inlineData" in part else
-                    part["fileData"] if "fileData" in part else
-                    part for part in content
-                ]
-                content = json.dumps(content)
+                api_content = []
+                for part in content:
+                    if "text" in part:
+                        api_content.append({"type": "text", "text": part["text"]})
+                    elif "input_file" in part:
+                        api_content.append({
+                            "type": "input_file",
+                            "file_id": part["input_file"]["file_id"]
+                        } if "file_id" in part["input_file"] else {
+                            "type": "input_file",
+                            "filename": part["input_file"]["filename"],
+                            "file_data": part["input_file"]["file_data"]
+                        })
+                    elif "input_image" in part:
+                        api_content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": part["input_image"]["image_url"],
+                                "detail": part["input_image"].get("detail", "auto")
+                            }
+                        })
+            else:
+                raise ValueError(f"无效的消息内容格式: {content}")
             api_msg = {
                 "role": role,
-                "content": content
+                "content": api_content
             }
             if "tool_calls" in msg:
                 api_msg["tool_calls"] = [
@@ -258,7 +253,7 @@ class OpenAIAPI:
             logger.debug(f"构造消息: {json.dumps(api_msg, ensure_ascii=False)}")
             api_messages.append(api_msg)
 
-        # 构造请求参数，使用 OpenAI 参数名
+        # 构造请求参数
         request_params = {
             "model": self.model,
             "messages": api_messages,
@@ -282,13 +277,8 @@ class OpenAIAPI:
             request_params["logprobs"] = response_logprobs
             if logprobs is not None:
                 request_params["top_logprobs"] = logprobs
-        if response_mime_type == "application/json" and response_schema is not None:
-            request_params["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"schema": response_schema, "strict": True}
-            }
-        elif response_mime_type == "application/json":
-            request_params["response_format"] = {"type": "json_object"}
+        if response_format:
+            request_params["response_format"] = response_format
 
         if tools is not None:
             tool_definitions = []
@@ -312,20 +302,18 @@ class OpenAIAPI:
                     "function": {
                         "name": name,
                         "description": getattr(func, "__doc__", f"调用 {name} 函数"),
-                        "parameters": params,
-                        "strict": True
+                        "parameters": params
                     }
                 })
             request_params["tools"] = tool_definitions
 
-        # 打印 POST 请求体
-        logger.info(f"发送 POST 请求体: {json.dumps(request_params, ensure_ascii=False, indent=2)}")
+        #logger.info(f"发送 POST 请求体: {json.dumps(request_params, ensure_ascii=False, indent=2)}")
 
         # 执行请求
         if stream:
             tool_calls_buffer = []
             async for chunk in await self.client.chat.completions.create(**request_params):
-                logger.info(f"流式原始响应体分片: {json.dumps(chunk.dict(), ensure_ascii=False, indent=2)}")
+                #logger.debug(f"流式响应分片: {json.dumps(chunk.dict(), ensure_ascii=False)}")
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta.content:
@@ -333,10 +321,8 @@ class OpenAIAPI:
                     elif delta.tool_calls:
                         for tool_call in delta.tool_calls:
                             if tool_call and tool_call.function:
-                                # 为每个工具调用生成唯一的 tool_call_id
-                                tool_call_id = tool_call.id if tool_call.id else f"call_{uuid.uuid4()}"
+                                tool_call_id = tool_call.id or f"call_{uuid.uuid4()}"
                                 try:
-                                    # 验证 arguments 是否为有效 JSON
                                     arguments = tool_call.function.arguments or "{}"
                                     json.loads(arguments)
                                     tool_calls_buffer.append({
@@ -349,33 +335,28 @@ class OpenAIAPI:
                                     })
                                     logger.info(f"工具调用: {tool_call.function.name}, 参数: {arguments}, ID: {tool_call_id}")
                                 except json.JSONDecodeError:
-                                    logger.error(f"工具调用 {tool_call.function.name} 的 arguments 无效: {arguments}, ID: {tool_call_id}")
+                                    logger.error(f"工具调用 {tool_call.function.name} 的 arguments 无效: {arguments}")
                                     continue
-                        # 当流式完成时，处理所有工具调用
                         if chunk.choices[0].finish_reason == "tool_calls" and tool_calls_buffer:
-                            # 追加 assistant 消息到 api_messages 和 messages
                             assistant_message = {
                                 "role": "assistant",
-                                "content": "Tool calls executed",  # 为 Gemini API 设置默认 content
+                                "content": "Tool calls executed",
                                 "tool_calls": tool_calls_buffer
                             }
                             api_messages.append(assistant_message)
                             messages.append(assistant_message)
-                            logger.debug(f"追加 assistant 消息: {json.dumps(assistant_message, ensure_ascii=False)}")
-                            # 执行工具调用
                             tool_responses = await self._execute_tool(
                                 [
                                     type('ToolCall', (), {
+                                        'id': tc["id"],
                                         'function': type('Function', (), {
                                             'name': tc["function"]["name"],
                                             'arguments': tc["function"]["arguments"]
-                                        })(),
-                                        'id': tc["id"]
+                                        })()
                                     })() for tc in tool_calls_buffer
                                 ],
                                 tools
                             )
-                            # 追加工具响应
                             for tool_response, tool_call_id in tool_responses:
                                 tool_message = {
                                     "role": "tool",
@@ -384,15 +365,11 @@ class OpenAIAPI:
                                 }
                                 api_messages.append(tool_message)
                                 messages.append(tool_message)
-                                logger.debug(f"追加工具响应: {json.dumps(tool_message, ensure_ascii=False)}")
-                            # 发起第二次请求（非流式）
                             second_request_params = request_params.copy()
                             second_request_params["messages"] = api_messages
                             second_request_params["stream"] = False
-                            logger.info(f"第二次 POST 请求体: {json.dumps(second_request_params, ensure_ascii=False, indent=2)}")
                             try:
                                 response = await self.client.chat.completions.create(**second_request_params)
-                                logger.info(f"第二次非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
                                 choice = response.choices[0]
                                 message = choice.message
                                 if message.content:
@@ -401,13 +378,12 @@ class OpenAIAPI:
                             except Exception as e:
                                 logger.error(f"第二次 API 调用失败: {str(e)}")
                                 yield f"错误: 无法获取最终响应 - {str(e)}"
-                            # 清空 tool_calls_buffer 以处理可能的后续工具调用
                             tool_calls_buffer = []
         else:
             for attempt in range(retries):
                 try:
                     response = await self.client.chat.completions.create(**request_params)
-                    logger.info(f"非流式原始响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
+                    #logger.info(f"非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
                     choice = response.choices[0]
                     message = choice.message
                     if message.tool_calls:
@@ -423,12 +399,11 @@ class OpenAIAPI:
                         ]
                         assistant_message = {
                             "role": "assistant",
-                            "content": "Tool calls executed",  # 为 Gemini API 设置默认 content
+                            "content": "Tool calls executed",
                             "tool_calls": tool_calls
                         }
                         api_messages.append(assistant_message)
                         messages.append(assistant_message)
-                        logger.info(f"工具调用: {json.dumps(tool_calls, ensure_ascii=False)}")
                         tool_responses = await self._execute_tool(message.tool_calls, tools)
                         for tool_response, tool_call_id in tool_responses:
                             tool_message = {
@@ -438,21 +413,17 @@ class OpenAIAPI:
                             }
                             api_messages.append(tool_message)
                             messages.append(tool_message)
-                        logger.debug(f"追加工具响应后的消息: {json.dumps(api_messages, ensure_ascii=False, indent=2)}")
-                        # 打印第二次请求的 POST 请求体
                         second_request_params = request_params.copy()
                         second_request_params["messages"] = api_messages
                         second_request_params["stream"] = False
-                        logger.info(f"第二次 POST 请求体: {json.dumps(second_request_params, ensure_ascii=False, indent=2)}")
                         response = await self.client.chat.completions.create(**second_request_params)
-                        logger.info(f"第二次非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
                         choice = response.choices[0]
                         message = choice.message
                         if message.content:
                             yield message.content
                             messages.append({"role": "assistant", "content": message.content})
                     else:
-                        if response_logprobs is not None and choice.logprobs:
+                        if response_logprobs and choice.logprobs:
                             yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
                         else:
                             yield message.content or ""
@@ -465,7 +436,6 @@ class OpenAIAPI:
                         raise
                     await asyncio.sleep(2 ** attempt)
 
-        # 恢复原始模型
         self.model = original_model
 
     async def chat(
@@ -477,35 +447,28 @@ class OpenAIAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
-        thinking_budget: Optional[int] = None,
-        topk: Optional[int] = None,
-        candidate_count: Optional[int] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         stop_sequences: Optional[List[str]] = None,
-        response_mime_type: Optional[str] = None,
-        response_schema: Optional[Dict] = None,
+        response_format: Optional[Dict] = None,
         seed: Optional[int] = None,
         response_logprobs: Optional[bool] = None,
         logprobs: Optional[int] = None,
-        audio_timestamp: Optional[bool] = None,
-        safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
     ) -> AsyncGenerator[str, None]:
-        """发起聊天请求，支持多文件上传和多内联内容"""
+        """发起聊天请求，支持多文件和多图片输入"""
         if isinstance(messages, str):
-            messages = [{"role": "user", "content": messages}]
-            use_history = False
-        else:
-            use_history = True
+            messages = [{"role": "user", "content": [{"type": "text", "text": messages}]}]
+        if system_instruction:
+            messages.insert(0, {"role": "system", "content": [{"type": "text", "text": system_instruction}]})
 
         async for part in self._chat_api(
             messages, stream, tools, max_output_tokens,
-            system_instruction, topp, temperature, thinking_budget,
-            topk, candidate_count, presence_penalty, frequency_penalty,
-            stop_sequences, response_mime_type, response_schema,
-            seed, response_logprobs, logprobs, audio_timestamp,
-            safety_settings, retries
+            system_instruction, topp, temperature,
+            presence_penalty, frequency_penalty,
+            stop_sequences, response_format,
+            seed, response_logprobs, logprobs,
+            retries
         ):
             yield part
 
@@ -555,9 +518,9 @@ async def main():
     # 示例 2：多轮对话（非流式，无额外参数）
     print("示例 2：多轮对话（非流式，无额外参数）")
     messages = [
-        {"role": "user", "content": "法国的首都是哪里？"},
-        {"role": "assistant", "content": "法国的首都是巴黎。"},
-        {"role": "user", "content": "巴黎的人口是多少？"}
+        {"role": "user", "content": [{"type": "text", "text": "法国的首都是哪里？"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "法国的首都是巴黎。"}]},
+        {"role": "user", "content": [{"type": "text", "text": "巴黎的人口是多少？"}]}
     ]
     async for part in api.chat(messages, stream=False):
         print(part, end="", flush=True)
@@ -573,7 +536,7 @@ async def main():
     # 示例 4：多轮对话（流式，带工具和 presence_penalty）
     print("示例 4：多轮对话（流式，带工具和 presence_penalty）")
     messages = [
-        {"role": "user", "content": "今天纽约的天气如何？"}
+        {"role": "user", "content": [{"type": "text", "text": "今天纽约的天气如何？"}]}
     ]
     async for part in api.chat(messages, stream=True, tools=tools, presence_penalty=0.5):
         print(part, end="", flush=True)
@@ -583,7 +546,7 @@ async def main():
     # 示例 5：多个工具调用（流式，带工具）
     print("示例 5：多个工具调用（流式，带工具）")
     messages = [
-        {"role": "user", "content": "请告诉我巴黎和波哥大的天气，并给 Bob 发送一封邮件（bob@email.com），内容为 'Hi Bob'。"}
+        {"role": "user", "content": [{"type": "text", "text": "请告诉我巴黎和波哥大的天气，并给 Bob 发送一封邮件（bob@email.com），内容为 'Hi Bob'。"}]}
     ]
     async for part in api.chat(messages, stream=True, tools=tools):
         print(part, end="", flush=True)
@@ -593,32 +556,124 @@ async def main():
     # 示例 6：推理模式（非流式，启用推理）
     print("示例 6：推理模式（非流式，启用推理）")
     messages = [
-        {"role": "user", "content": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}
+        {"role": "user", "content": [{"type": "text", "text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    async for part in api.chat(messages, stream=False, thinking_budget=24576):
+    async for part in api.chat(messages, stream=False, max_output_tokens=500):
         print("最终回答:", part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
-    # 示例 7：结构化输出（非流式，使用 response_schema）
-    print("示例 7：结构化输出（非流式，使用 response_schema）")
-    schema = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"}
-        },
-        "required": ["name", "age"]
+    # 示例 7：结构化输出（非流式，使用 response_format）
+    print("示例 7：结构化输出（非流式，使用 response_format）")
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "person_info",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "integer"}
+                },
+                "required": ["name", "age"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
     }
     messages = [
-        {"role": "user", "content": "请提供一个人的信息，包括姓名和年龄。"}
+        {"role": "user", "content": [{"type": "text", "text": "请提供一个人的信息，包括姓名和年龄。"}]}
     ]
-    async for part in api.chat(
-        messages, stream=False, response_mime_type="application/json", response_schema=schema
-    ):
+    async for part in api.chat(messages, stream=False, response_format=response_format):
         print("结构化输出:", part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
+
+    # 示例 8：聊天中使用多文件上传（PDF）
+    print("示例 8：聊天中使用多文件上传（PDF）")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # 创建临时 PDF 文件
+        file_paths = [
+            os.path.join(temp_dir, "doc1.pdf"),
+            os.path.join(temp_dir, "doc2.pdf")
+        ]
+        display_names = ["doc1.pdf", "doc2.pdf"]
+
+        # 写入简单 PDF 内容（模拟 PDF 文本）
+        async def create_temp_pdfs():
+            async with aiofiles.open(file_paths[0], 'w') as f:
+                await f.write("%PDF-1.4\n%% Simple PDF\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 44 >>\nstream\nBT /F1 12 Tf 100 700 Td (Project Plan: Define milestones) Tj ET\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF")
+            async with aiofiles.open(file_paths[1], 'w') as f:
+                await f.write("%PDF-1.4\n%% Simple PDF\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 50 >>\nstream\nBT /F1 12 Tf 100 700 Td (Budget: $5000 for marketing) Tj ET\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF")
+
+        await create_temp_pdfs()
+
+        # 上传文件
+        upload_results = await api.upload_files(file_paths, display_names)
+        file_parts = []
+        for idx, result in enumerate(upload_results):
+            if result["fileId"] and not result["error"]:
+                file_parts.append({
+                    "input_file": {
+                        "file_id": result["fileId"]
+                    }
+                })
+            else:
+                print(f"文件 {file_paths[idx]} 上传失败: {result['error']}")
+
+        if file_parts:
+            # 构造包含 input_file 的聊天消息
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请总结以下 PDF 文件的要点："},
+                    *file_parts
+                ]
+            }]
+            print("发送 PDF 文件进行聊天：")
+            async for part in api.chat(messages, stream=False):
+                print(part, end="", flush=True)
+            print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+        else:
+            print("无有效文件 ID，无法发起聊天")
+        print()
+
+    # 示例 9：聊天中使用多 inline 图片
+    print("示例 9：聊天中使用多 inline 图片")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # 创建临时图片文件
+        file_paths = [
+            '《Break the Cocoon》封面.jpg',
+            '92D32EDFF4535D91F4E60234FD4703E1.jpg'
+        ]
+
+        # 转换为 inline 图片
+        inline_results = await api.prepare_inline_image_batch(file_paths, detail="high")
+        image_parts = []
+        for idx, result in enumerate(inline_results):
+            if "input_image" in result and result["input_image"]:
+                image_parts.append({
+                    "input_image": result["input_image"]
+                })
+            else:
+                print(f"图片 {file_paths[idx]} 处理失败: {result.get('error', '未知错误')}")
+
+        if image_parts:
+            # 构造包含 input_image 的聊天消息
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请描述以下图片的内容："},
+                    *image_parts
+                ]
+            }]
+            print("发送 inline 图片进行聊天：")
+            async for part in api.chat(messages, stream=False):
+                print(part, end="", flush=True)
+            #print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+        else:
+            print("无有效 inline 图片，无法发起聊天")
+        print()
 
 if __name__ == "__main__":
     asyncio.run(main())
