@@ -241,15 +241,9 @@ class GeminiAPI:
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict], None]:
         """核心 API 调用逻辑，支持所有 Gemini 模型参数"""
-        # 验证 thinking_budget 和 enable_thinking
-        enable_thinking = thinking_budget is not None and thinking_budget > 0
         if thinking_budget is not None:
             if not isinstance(thinking_budget, int) or thinking_budget < 0 or thinking_budget > 24576:
                 raise ValueError("thinking_budget 必须是 0 到 24576 之间的整数")
-            if self.model not in ["gemini-1.5-flash", "gemini-1.5-pro"]:
-                logger.warning(f"模型 {self.model} 不支持 thinking_budget，已忽略该参数")
-                thinking_budget = None
-                enable_thinking = False
 
         # 验证其他参数
         if topp is not None and (topp < 0 or topp > 1):
@@ -323,9 +317,8 @@ class GeminiAPI:
             generation_config["logprobs"] = logprobs
         if audio_timestamp is not None:
             generation_config["audioTimestamp"] = audio_timestamp
-        if enable_thinking or thinking_budget is not None:
+        if thinking_budget is not None:
             generation_config["thinkingConfig"] = {
-                "enableThinking": enable_thinking,
                 "thinkingBudget": thinking_budget if thinking_budget is not None else 8192
             }
 
@@ -357,7 +350,7 @@ class GeminiAPI:
                                         if "text" in part:
                                             model_message["parts"].append({"text": part["text"]})
                                             yield part["text"]
-                                        elif "thoughts" in part and enable_thinking:
+                                        elif "thoughts" in part:
                                             model_message["parts"].append({"thoughts": part["thoughts"]})
                                             yield {"thoughts": part["thoughts"]}
                                         elif "functionCall" in part and tools:
@@ -426,7 +419,7 @@ class GeminiAPI:
                             yield text
                     else:
                         parts = candidate["content"]["parts"]
-                        thoughts = [part["thoughts"] for part in parts if "thoughts" in part and enable_thinking]
+                        thoughts = [part["thoughts"] for part in parts if "thoughts" in part]
                         text = "".join(part["text"] for part in parts if "text" in part)
                         logprobs_data = candidate.get("logprobs", []) if response_logprobs else []
                         if thoughts or logprobs_data:
