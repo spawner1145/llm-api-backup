@@ -310,14 +310,10 @@ class OpenAIAPI:
                 })
             request_params["tools"] = tool_definitions
 
-        #logger.info(f"发送 POST 请求体: {json.dumps(request_params, ensure_ascii=False, indent=2)}")
-
-        # 执行请求
         if stream:
             assistant_content = ""
             tool_calls_buffer = []
             async for chunk in await self.client.chat.completions.create(**request_params):
-                # logger.debug(f"流式响应分片: {json.dumps(chunk.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
@@ -347,7 +343,7 @@ class OpenAIAPI:
                         if chunk.choices[0].finish_reason == "tool_calls" and tool_calls_buffer:
                             assistant_message = {
                                 "role": "assistant",
-                                "content": "Tool calls executed",
+                                "content": [{"type": "text", "text": "Tool calls executed"}],
                                 "tool_calls": tool_calls_buffer
                             }
                             api_messages.append(assistant_message)
@@ -377,12 +373,11 @@ class OpenAIAPI:
                             second_request_params["stream"] = False
                             try:
                                 response = await self.client.chat.completions.create(**second_request_params)
-                                # logger.debug(f"第二次 API 调用响应: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                                 choice = response.choices[0]
                                 message = choice.message
                                 assistant_message = {
                                     "role": "assistant",
-                                    "content": message.content or ""
+                                    "content": [{"type": "text", "text": message.content or ""}]
                                 }
                                 messages.append(assistant_message)
                                 if hasattr(message, 'reasoning_content') and message.reasoning_content:
@@ -392,17 +387,22 @@ class OpenAIAPI:
                             except Exception as e:
                                 logger.error(f"第二次 API 调用失败: {str(e)}")
                                 yield f"错误: 无法获取最终响应 - {str(e)}"
-                                messages.append({"role": "assistant", "content": f"错误: {str(e)}"})
+                                messages.append({
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": f"错误: {str(e)}"}]
+                                })
                             tool_calls_buffer = []
                     if chunk.choices[0].finish_reason in ["stop", "length"]:
                         if assistant_content:
-                            messages.append({"role": "assistant", "content": assistant_content})
+                            messages.append({
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": assistant_content}]
+                            })
                         assistant_content = ""
         else:
             for attempt in range(retries):
                 try:
                     response = await self.client.chat.completions.create(**request_params)
-                    # logger.debug(f"非流式响应体: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                     choice = response.choices[0]
                     message = choice.message
                     if message.tool_calls:
@@ -418,7 +418,7 @@ class OpenAIAPI:
                         ]
                         assistant_message = {
                             "role": "assistant",
-                            "content": "Tool calls executed",
+                            "content": [{"type": "text", "text": "Tool calls executed"}],
                             "tool_calls": tool_calls
                         }
                         api_messages.append(assistant_message)
@@ -436,12 +436,11 @@ class OpenAIAPI:
                         second_request_params["messages"] = api_messages
                         second_request_params["stream"] = False
                         response = await self.client.chat.completions.create(**second_request_params)
-                        # logger.debug(f"第二次 API 调用响应: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                         choice = response.choices[0]
                         message = choice.message
                         assistant_message = {
                             "role": "assistant",
-                            "content": message.content or ""
+                            "content": [{"type": "text", "text": message.content or ""}]
                         }
                         messages.append(assistant_message)
                         if hasattr(message, 'reasoning_content') and message.reasoning_content:
@@ -451,7 +450,7 @@ class OpenAIAPI:
                     else:
                         assistant_message = {
                             "role": "assistant",
-                            "content": message.content or ""
+                            "content": [{"type": "text", "text": message.content or ""}]
                         }
                         if response_logprobs and choice.logprobs:
                             assistant_message["logprobs"] = choice.logprobs.content
