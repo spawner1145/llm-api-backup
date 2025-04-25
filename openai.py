@@ -495,7 +495,12 @@ class OpenAIAPI:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": [{"type": "text", "text": messages}]}]
         if system_instruction:
-            messages.insert(0, {"role": "system", "content": [{"type": "text", "text": system_instruction}]})
+            for i, message in enumerate(messages):
+                if message.get("role") == "system":
+                    messages[i] = {"role": "system", "content": [{"type": "text", "text": system_instruction}]}
+                    break
+            else:
+                messages.insert(0, {"role": "system", "content": [{"type": "text", "text": system_instruction}]})
 
         async for part in self._chat_api(
             messages, stream, tools, max_output_tokens,
