@@ -12,16 +12,19 @@ import tempfile
 from openai import AsyncOpenAI
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 class OpenAIAPI:
     def __init__(
         self,
         apikey: str,
-        baseurl: str = "https://api.openai.com/v1",
-        model: str = "gpt-4o",
-        proxy: Optional[str] = None
+        baseurl: str = "https://api-inference.modelscope.cn",
+        model: str = "deepseek-ai/DeepSeek-R1",
+        proxy: Optional[Dict[str, str]] = None
     ):
         self.apikey = apikey
         self.baseurl = baseurl.rstrip('/')
@@ -87,16 +90,16 @@ class OpenAIAPI:
 
     async def prepare_inline_image(self, file_path: str, detail: str = "auto") -> Dict[str, Union[Dict, None]]:
         """将单个图片转换为 Base64 编码的 input_image"""
-        file_size = os.path.getsize(file_path)
-        if file_size > 20 * 1024 * 1024:  # 20MB 限制
-            raise ValueError(f"文件 {file_path} 过大，超过 20MB 限制")
-
-        mime_type, _ = mimetypes.guess_type(file_path)
-        if not mime_type or mime_type not in ["image/jpeg", "image/png", "image/webp", "image/gif"]:
-            mime_type = "image/jpeg"
-            logger.warning(f"无效图片 MIME 类型，使用默认值: {mime_type}")
-
         try:
+            file_size = os.path.getsize(file_path)
+            if file_size > 20 * 1024 * 1024:  # 20MB 限制
+                raise ValueError(f"文件 {file_path} 过大，超过 20MB 限制")
+
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if not mime_type or mime_type not in ["image/jpeg", "image/png", "image/webp", "image/gif"]:
+                mime_type = "image/jpeg"
+                logger.warning(f"无效图片 MIME 类型，使用默认值: {mime_type}")
+
             async with aiofiles.open(file_path, 'rb') as f:
                 file_content = await f.read()
             base64_data = base64.b64encode(file_content).decode('utf-8')
@@ -146,7 +149,7 @@ class OpenAIAPI:
                     logger.info(f"工具结果: {name} 返回 {result}, ID: {tool_call_id}")
                     tool_response = {
                         "role": "tool",
-                        "content": json.dumps(result),  # OpenAI 要求工具响应为 JSON 字符串
+                        "content": json.dumps(result),
                         "tool_call_id": tool_call_id
                     }
                     tool_responses.append((tool_response, tool_call_id))
@@ -187,7 +190,7 @@ class OpenAIAPI:
         logprobs: Optional[int] = None,
         retries: int = 3
     ) -> AsyncGenerator[str, None]:
-        """核心 API 调用逻辑，遵循 OpenAI 标准"""
+        """核心 API 调用逻辑，遵循 OpenAI 标准，支持 reasoning_content 但不记录到历史"""
         original_model = self.model
 
         # 验证参数
@@ -311,13 +314,17 @@ class OpenAIAPI:
 
         # 执行请求
         if stream:
+            assistant_content = ""
             tool_calls_buffer = []
             async for chunk in await self.client.chat.completions.create(**request_params):
-                #logger.debug(f"流式响应分片: {json.dumps(chunk.dict(), ensure_ascii=False)}")
+                # logger.debug(f"流式响应分片: {json.dumps(chunk.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta.content:
                         yield delta.content
+                        assistant_content += delta.content
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        yield f"REASONING: {delta.reasoning_content}"
                     elif delta.tool_calls:
                         for tool_call in delta.tool_calls:
                             if tool_call and tool_call.function:
@@ -370,20 +377,32 @@ class OpenAIAPI:
                             second_request_params["stream"] = False
                             try:
                                 response = await self.client.chat.completions.create(**second_request_params)
+                                # logger.debug(f"第二次 API 调用响应: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                                 choice = response.choices[0]
                                 message = choice.message
+                                assistant_message = {
+                                    "role": "assistant",
+                                    "content": message.content or ""
+                                }
+                                messages.append(assistant_message)
                                 if message.content:
                                     yield message.content
-                                    messages.append({"role": "assistant", "content": message.content})
+                                if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                                    yield f"REASONING: {message.reasoning_content}"
                             except Exception as e:
                                 logger.error(f"第二次 API 调用失败: {str(e)}")
                                 yield f"错误: 无法获取最终响应 - {str(e)}"
+                                messages.append({"role": "assistant", "content": f"错误: {str(e)}"})
                             tool_calls_buffer = []
+                    if chunk.choices[0].finish_reason in ["stop", "length"]:
+                        if assistant_content:
+                            messages.append({"role": "assistant", "content": assistant_content})
+                        assistant_content = ""
         else:
             for attempt in range(retries):
                 try:
                     response = await self.client.chat.completions.create(**request_params)
-                    #logger.info(f"非流式响应体: {json.dumps(response.dict(), ensure_ascii=False, indent=2)}")
+                    # logger.debug(f"非流式响应体: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                     choice = response.choices[0]
                     message = choice.message
                     if message.tool_calls:
@@ -417,18 +436,35 @@ class OpenAIAPI:
                         second_request_params["messages"] = api_messages
                         second_request_params["stream"] = False
                         response = await self.client.chat.completions.create(**second_request_params)
+                        # logger.debug(f"第二次 API 调用响应: {json.dumps(response.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                         choice = response.choices[0]
                         message = choice.message
+                        assistant_message = {
+                            "role": "assistant",
+                            "content": message.content or ""
+                        }
+                        messages.append(assistant_message)
                         if message.content:
                             yield message.content
-                            messages.append({"role": "assistant", "content": message.content})
+                        if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                            yield f"REASONING: {message.reasoning_content}"
                     else:
+                        assistant_message = {
+                            "role": "assistant",
+                            "content": message.content or ""
+                        }
                         if response_logprobs and choice.logprobs:
+                            assistant_message["logprobs"] = choice.logprobs.content
+                            messages.append(assistant_message)
                             yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
+                            if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                                yield f"REASONING: {message.reasoning_content}"
                         else:
-                            yield message.content or ""
-                        if message.content:
-                            messages.append({"role": "assistant", "content": message.content})
+                            messages.append(assistant_message)
+                            if message.content:
+                                yield message.content
+                            if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                                yield f"REASONING: {message.reasoning_content}"
                     break
                 except Exception as e:
                     logger.error(f"API 调用失败 (尝试 {attempt+1}/{retries}): {str(e)}")
@@ -498,9 +534,13 @@ async def send_email(to: str, body: str) -> str:
 # 主函数
 async def main():
     api = OpenAIAPI(
-        apikey="",  # 请替换为实际 Gemini API 密钥
-        baseurl="https://generativelanguage.googleapis.com/v1beta/openai/",
-        model="gemini-2.0-flash-001"
+        apikey="",
+        baseurl="https://api-inference.modelscope.cn/v1/",
+        model="deepseek-ai/DeepSeek-R1",
+        proxy={
+            "http://": "http://127.0.0.1:7890",
+            "https://": "http://127.0.0.1:7890"
+        }
     )
     tools = {
         "schedule_meeting": schedule_meeting,
@@ -511,9 +551,11 @@ async def main():
 
     # 示例 1：单轮对话（非流式，无额外参数）
     print("示例 1：单轮对话（非流式，无额外参数）")
-    async for part in api.chat("法国的首都是哪里？", stream=False):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "法国的首都是哪里？"}]}]
+    async for part in api.chat(messages, stream=False):
         print(part, end="", flush=True)
-    print("\n")
+    print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
 
     # 示例 2：多轮对话（非流式，无额外参数）
     print("示例 2：多轮对话（非流式，无额外参数）")
@@ -529,9 +571,11 @@ async def main():
 
     # 示例 3：单轮对话（流式，无额外参数）
     print("示例 3：单轮对话（流式，无额外参数）")
-    async for part in api.chat("讲一个关于魔法背包的故事。", stream=True):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "讲一个关于魔法背包的故事。"}]}]
+    async for part in api.chat(messages, stream=True):
         print(part, end="", flush=True)
-    print("\n")
+    print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
 
     # 示例 4：多轮对话（流式，带工具和 presence_penalty）
     print("示例 4：多轮对话（流式，带工具和 presence_penalty）")
@@ -553,13 +597,13 @@ async def main():
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
-    # 示例 6：推理模式（非流式，启用推理）
-    print("示例 6：推理模式（非流式，启用推理）")
+    # 示例 6：推理模式（流式，启用推理）
+    print("示例 6：推理模式（流式，启用推理）")
     messages = [
-        {"role": "user", "content": [{"type": "text", "text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
+        {"role": "user", "content": [{"type": "text", "text": "你好"}]}
     ]
-    async for part in api.chat(messages, stream=False, max_output_tokens=500):
-        print("最终回答:", part, end="", flush=True)
+    async for part in api.chat(messages, stream=True, max_output_tokens=500):
+        print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -591,80 +635,78 @@ async def main():
 
     # 示例 8：聊天中使用多文件上传（PDF）
     print("示例 8：聊天中使用多文件上传（PDF）")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # 创建临时 PDF 文件
-        file_paths = [
-            os.path.join(temp_dir, "doc1.pdf"),
-            os.path.join(temp_dir, "doc2.pdf")
-        ]
-        display_names = ["doc1.pdf", "doc2.pdf"]
+    
+    file_paths = [
+        'pdf1.pdf',
+        'pdf2.pdf'
+    ]
+    display_names = ["doc1.pdf", "doc2.pdf"]
 
-        # 上传文件
-        upload_results = await api.upload_files(file_paths, display_names)
-        file_parts = []
-        for idx, result in enumerate(upload_results):
-            if result["fileId"] and not result["error"]:
-                file_parts.append({
-                    "input_file": {
-                        "file_id": result["fileId"]
-                    }
-                })
-            else:
-                print(f"文件 {file_paths[idx]} 上传失败: {result['error']}")
-
-        if file_parts:
-            # 构造包含 input_file 的聊天消息
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请总结以下 PDF 文件的要点："},
-                    *file_parts
-                ]
-            }]
-            print("发送 PDF 文件进行聊天：")
-            async for part in api.chat(messages, stream=False):
-                print(part, end="", flush=True)
-            print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    # 上传文件
+    upload_results = await api.upload_files(file_paths, display_names)
+    file_parts = []
+    for idx, result in enumerate(upload_results):
+        if result["fileId"] and not result["error"]:
+            file_parts.append({
+                "input_file": {
+                    "file_id": result["fileId"]
+                }
+            })
         else:
-            print("无有效文件 ID，无法发起聊天")
-        print()
+            print(f"文件 {file_paths[idx]} 上传失败: {result['error']}")
+
+    if file_parts:
+        # 构造包含 input_file 的聊天消息
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请总结以下 PDF 文件的要点："},
+                *file_parts
+            ]
+        }]
+        print("发送 PDF 文件进行聊天：")
+        async for part in api.chat(messages, stream=False):
+            print(part, end="", flush=True)
+        print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    else:
+        print("无有效文件 ID，无法发起聊天")
+    print()
 
     # 示例 9：聊天中使用多 inline 图片
     print("示例 9：聊天中使用多 inline 图片")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # 创建临时图片文件
-        file_paths = [
-            '《Break the Cocoon》封面.jpg',
-            '92D32EDFF4535D91F4E60234FD4703E1.jpg'
-        ]
+    
+    file_paths = [
+        '《Break the Cocoon》封面.jpg',
+        '92D32EDFF4535D91F4E60234FD4703E1.jpg'
+    ]
 
-        # 转换为 inline 图片
-        inline_results = await api.prepare_inline_image_batch(file_paths, detail="high")
-        image_parts = []
-        for idx, result in enumerate(inline_results):
-            if "input_image" in result and result["input_image"]:
-                image_parts.append({
-                    "input_image": result["input_image"]
-                })
-            else:
-                print(f"图片 {file_paths[idx]} 处理失败: {result.get('error', '未知错误')}")
-
-        if image_parts:
-            # 构造包含 input_image 的聊天消息
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请描述以下图片的内容："},
-                    *image_parts
-                ]
-            }]
-            print("发送 inline 图片进行聊天：")
-            async for part in api.chat(messages, stream=False):
-                print(part, end="", flush=True)
-            #print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    # 转换为 inline 图片
+    inline_results = await api.prepare_inline_image_batch(file_paths, detail="high")
+    image_parts = []
+    for idx, result in enumerate(inline_results):
+        if "input_image" in result and result["input_image"]:
+            image_parts.append({
+                "input_image": result["input_image"]
+            })
         else:
-            print("无有效 inline 图片，无法发起聊天")
-        print()
+            print(f"图片 {file_paths[idx]} 处理失败: {result.get('error', '未知错误')}")
+
+    if image_parts:
+        # 构造包含 input_image 的聊天消息
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请描述以下图片的内容："},
+                *image_parts
+            ]
+        }]
+        print("发送 inline 图片进行聊天：")
+        async for part in api.chat(messages, stream=False):
+            print(part, end="", flush=True)
+        print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    else:
+        print("无有效 inline 图片，无法发起聊天")
+    print()
 
 if __name__ == "__main__":
     asyncio.run(main())
