@@ -320,11 +320,11 @@ class OpenAIAPI:
                 # logger.debug(f"流式响应分片: {json.dumps(chunk.dict(), ensure_ascii=False)}")  # 注释掉原始返回内容日志
                 if chunk.choices:
                     delta = chunk.choices[0].delta
+                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                        yield f"REASONING: {delta.reasoning_content}"
                     if delta.content:
                         yield delta.content
                         assistant_content += delta.content
-                    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                        yield f"REASONING: {delta.reasoning_content}"
                     elif delta.tool_calls:
                         for tool_call in delta.tool_calls:
                             if tool_call and tool_call.function:
@@ -385,10 +385,10 @@ class OpenAIAPI:
                                     "content": message.content or ""
                                 }
                                 messages.append(assistant_message)
-                                if message.content:
-                                    yield message.content
                                 if hasattr(message, 'reasoning_content') and message.reasoning_content:
                                     yield f"REASONING: {message.reasoning_content}"
+                                if message.content:
+                                    yield message.content
                             except Exception as e:
                                 logger.error(f"第二次 API 调用失败: {str(e)}")
                                 yield f"错误: 无法获取最终响应 - {str(e)}"
@@ -444,10 +444,10 @@ class OpenAIAPI:
                             "content": message.content or ""
                         }
                         messages.append(assistant_message)
-                        if message.content:
-                            yield message.content
                         if hasattr(message, 'reasoning_content') and message.reasoning_content:
                             yield f"REASONING: {message.reasoning_content}"
+                        if message.content:
+                            yield message.content
                     else:
                         assistant_message = {
                             "role": "assistant",
@@ -456,15 +456,15 @@ class OpenAIAPI:
                         if response_logprobs and choice.logprobs:
                             assistant_message["logprobs"] = choice.logprobs.content
                             messages.append(assistant_message)
-                            yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
                                 yield f"REASONING: {message.reasoning_content}"
+                            yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
                         else:
                             messages.append(assistant_message)
-                            if message.content:
-                                yield message.content
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
                                 yield f"REASONING: {message.reasoning_content}"
+                            if message.content:
+                                yield message.content
                     break
                 except Exception as e:
                     logger.error(f"API 调用失败 (尝试 {attempt+1}/{retries}): {str(e)}")
