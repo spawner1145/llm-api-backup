@@ -17,7 +17,7 @@ class GeminiAPI:
         self,
         apikey: str,
         baseurl: str = "https://generativelanguage.googleapis.com",
-        model: str = "gemini-2.0-flash-001",  # 更新为支持多模态的模型
+        model: str = "gemini-2.0-flash-001",
         proxies: Optional[Dict[str, str]] = None
     ):
         self.apikey = apikey
@@ -29,10 +29,10 @@ class GeminiAPI:
             proxies=proxies,
             timeout=60.0
         )
+        self.tools = None  # 保存工具定义
 
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
         """上传单个文件到 Gemini File API，并检查 ACTIVE 状态"""
-        # 验证文件大小
         try:
             file_size = os.path.getsize(file_path)
             if file_size > 2 * 1024 * 1024 * 1024:  # 2GB 限制
@@ -46,7 +46,6 @@ class GeminiAPI:
             mime_type = "application/octet-stream"
             logger.warning(f"无法检测文件 {file_path} 的 MIME 类型，使用默认值: {mime_type}")
 
-        # 检查支持的 MIME 类型
         supported_mime_types = [
             "image/jpeg", "image/png", "image/gif", "image/webp",
             "video/mp4", "video/mpeg", "video/avi", "video/wmv", "video/flv",
@@ -56,7 +55,6 @@ class GeminiAPI:
         if mime_type not in supported_mime_types:
             logger.warning(f"MIME 类型 {mime_type} 可能不受支持，可能导致上传失败")
 
-        # 上传文件
         try:
             async with aiofiles.open(file_path, 'rb') as f:
                 files = {'file': (display_name or os.path.basename(file_path), await f.read(), mime_type)}
@@ -76,7 +74,6 @@ class GeminiAPI:
             logger.error(f"文件 {file_path} 上传失败: {str(e)}")
             return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 上传失败: {str(e)}"}
 
-        # 等待文件状态变为 ACTIVE
         if not await self.wait_for_file_active(file_uri, timeout=120, interval=2):
             logger.error(f"文件 {file_path} 未能在规定时间内变为 ACTIVE 状态")
             return {"fileUri": None, "mimeType": mime_type, "error": f"文件 {file_path} 未能在规定时间内变为 ACTIVE 状态"}
@@ -86,7 +83,7 @@ class GeminiAPI:
 
     async def wait_for_file_active(self, file_uri: str, timeout: Optional[int] = None, interval: int = 2) -> bool:
         """等待文件状态变为 ACTIVE"""
-        file_id = file_uri.split('/')[-1]  # 提取文件 ID
+        file_id = file_uri.split('/')[-1]
         start_time = asyncio.get_event_loop().time()
 
         while timeout is None or (asyncio.get_event_loop().time() - start_time < timeout):
@@ -122,13 +119,11 @@ class GeminiAPI:
         if display_names and len(display_names) != len(file_paths):
             raise ValueError("display_names 长度必须与 file_paths 一致")
 
-        # 创建并行上传任务
         tasks = []
         for idx, file_path in enumerate(file_paths):
             display_name = display_names[idx] if display_names else None
             tasks.append(self.upload_file(file_path, display_name))
 
-        # 并行执行上传
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final_results = []
         for idx, result in enumerate(results):
@@ -142,7 +137,6 @@ class GeminiAPI:
     async def prepare_inline_data(self, file_path: str) -> Dict[str, Dict[str, str]]:
         """将单个小文件转换为 Base64 编码的 inlineData"""
         file_size = os.path.getsize(file_path)
-        # Base64 编码后大小增加约 33%，检查是否超 20MB
         if file_size * 4 / 3 > 20 * 1024 * 1024:
             raise ValueError(f"文件 {file_path} 过大，无法作为 inlineData，建议使用 File API 上传")
 
@@ -172,7 +166,7 @@ class GeminiAPI:
         for file_path in file_paths:
             try:
                 file_size = os.path.getsize(file_path)
-                encoded_size = file_size * 4 / 3  # Base64 编码后大小
+                encoded_size = file_size * 4 / 3
                 total_size += encoded_size
                 if total_size > 20 * 1024 * 1024:
                     raise ValueError(f"文件 {file_path} 加入后总大小超过 20MB，无法作为 inlineData")
@@ -203,7 +197,7 @@ class GeminiAPI:
                         result = func(**args)
                 except Exception as e:
                     result = f"函数 {name} 执行失败: {str(e)}"
-                function_responses.append({
+                function_response = {
                     "role": "user",
                     "parts": [
                         {
@@ -213,7 +207,22 @@ class GeminiAPI:
                             }
                         }
                     ]
-                })
+                }
+                function_responses.append(function_response)
+            else:
+                logger.error(f"工具 {name} 未定义")
+                function_response = {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "functionResponse": {
+                                "name": name,
+                                "response": {"error": f"工具 {name} 未定义"}
+                            }
+                        }
+                    ]
+                }
+                function_responses.append(function_response)
         return function_responses
 
     async def _chat_api(
@@ -245,7 +254,6 @@ class GeminiAPI:
             if not isinstance(thinking_budget, int) or thinking_budget < 0 or thinking_budget > 24576:
                 raise ValueError("thinking_budget 必须是 0 到 24576 之间的整数")
 
-        # 验证其他参数
         if topp is not None and (topp < 0 or topp > 1):
             raise ValueError("topP 必须在 0 到 1 之间")
         if temperature is not None and (temperature < 0 or temperature > 2):
@@ -262,6 +270,10 @@ class GeminiAPI:
             raise ValueError("responseMimeType 必须是 'text/plain' 或 'application/json'")
         if logprobs is not None and (logprobs < 0 or logprobs > 5):
             raise ValueError("logprobs 必须在 0 到 5 之间")
+
+        # 更新类的 tools 属性
+        if tools:
+            self.tools = tools
 
         body = {"contents": api_contents}
         if tools:
@@ -355,12 +367,13 @@ class GeminiAPI:
                                             yield {"thoughts": part["thoughts"]}
                                         elif "functionCall" in part and tools:
                                             model_message["parts"].append({"functionCall": part["functionCall"]})
+                                            if model_message["parts"]:
+                                                api_contents.append(model_message)
                                             function_calls = [part["functionCall"]]
                                             function_responses = await self._execute_tool(function_calls, tools)
-                                            api_contents.append(model_message)
                                             api_contents.extend(function_responses)
                                             async for text in self._chat_api(
-                                                api_contents, stream=False, tools=tools,
+                                                api_contents, stream=stream, tools=tools,
                                                 max_output_tokens=max_output_tokens,
                                                 system_instruction=system_instruction,
                                                 topp=topp, temperature=temperature,
@@ -377,6 +390,7 @@ class GeminiAPI:
                                                 retries=retries
                                             ):
                                                 yield text
+                                            model_message = {"role": "model", "parts": []}
                             except json.JSONDecodeError as e:
                                 logger.error(f"流式 JSON 解析错误: {e}")
                 if model_message["parts"] and not any("functionCall" in part for part in model_message["parts"]):
@@ -469,13 +483,19 @@ class GeminiAPI:
         safety_settings: Optional[List[Dict]] = None,
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict, List[Dict[str, any]]], None]:
-        """发起聊天请求，支持多文件上传和多内联内容"""
+        """发起聊天请求，支持多文件上传和多内联内容
+
+        更新后的 messages 可直接作为请求体的 contents 字段使用。
+        如果使用了 tools，需在后续调用 chat 时提供相同的 tools 参数，
+        或从 self.tools 获取保存的工具定义以构造请求体的 tools 字段。
+        """
         if isinstance(messages, str):
             messages = [{"role": "user", "parts": [{"text": messages}]}]
             use_history = False
         else:
             use_history = True
 
+        # 将用户输入的 messages 转换为 API 所需的 api_contents 格式
         api_contents = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
@@ -483,13 +503,11 @@ class GeminiAPI:
             for p in msg["parts"]:
                 if isinstance(p, str):
                     parts.append({"text": p})
-                elif isinstance(p, dict) and ("fileData" in p or "inlineData" in p):
+                elif isinstance(p, dict) and ("fileData" in p or "inlineData" in p or "functionCall" in p or "functionResponse" in p):
                     parts.append(p)
                 else:
                     parts.append(p)
             api_contents.append({"role": role, "parts": parts})
-
-        #logger.info(f"初始 API contents: {json.dumps(api_contents, ensure_ascii=False, indent=2)}")
 
         full_text = ""
         thoughts = []
@@ -513,18 +531,31 @@ class GeminiAPI:
                 full_text += part
                 yield part
 
-        if use_history and full_text:
-            if thoughts or logprobs_data:
+        # 更新用户的历史记录（messages），确保与 api_contents 同步
+        if use_history:
+            # 清空 messages 并重建，以确保与 api_contents 一致
+            messages.clear()
+            for content in api_contents:
                 parts = []
-                if thoughts:
-                    parts.append({"thoughts": thoughts})
-                parts.append({"text": full_text})
-                if logprobs_data:
-                    parts.append({"logprobs": logprobs_data})
-                messages.append({"role": "assistant", "parts": parts})
-            else:
-                messages.append({"role": "assistant", "parts": [{"text": full_text}]})
-            #logger.info(f"最终消息列表: {json.dumps(messages, ensure_ascii=False, indent=2)}")
+                # 合并同一消息中的多个 text 部分
+                text_parts = [part["text"] for part in content["parts"] if "text" in part]
+                if text_parts:
+                    parts.append({"text": "".join(text_parts)})
+                for part in content["parts"]:
+                    if "fileData" in part:
+                        parts.append({"fileData": part["fileData"]})
+                    elif "inlineData" in part:
+                        parts.append({"inlineData": part["inlineData"]})
+                    elif "functionCall" in part:
+                        parts.append({"functionCall": part["functionCall"]})
+                    elif "functionResponse" in part:
+                        parts.append({"functionResponse": part["functionResponse"]})
+                    elif "thoughts" in part:
+                        parts.append({"thoughts": part["thoughts"]})
+                    elif "logprobs" in part:
+                        parts.append({"logprobs": part["logprobs"]})
+                role = "user" if content["role"] == "user" else "assistant"
+                messages.append({"role": role, "parts": parts})
 
     async def __aenter__(self):
         return self
