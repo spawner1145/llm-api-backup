@@ -18,7 +18,7 @@ class GeminiAPI:
         apikey: str,
         baseurl: str = "https://generativelanguage.googleapis.com",
         model: str = "gemini-2.0-flash-001",  # 更新为支持多模态的模型
-        proxy: Optional[Dict[str, str]] = None
+        proxies: Optional[Dict[str, str]] = None
     ):
         self.apikey = apikey
         self.baseurl = baseurl.rstrip('/')
@@ -26,7 +26,7 @@ class GeminiAPI:
         self.client = httpx.AsyncClient(
             base_url=baseurl,
             params={'key': apikey},
-            proxies=proxy,
+            proxies=proxies,
             timeout=60.0
         )
 
