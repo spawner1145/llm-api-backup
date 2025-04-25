@@ -605,7 +605,7 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    async for part in api.chat(messages, stream=False, thinking_budget=24576):
+    async for part in api.chat(messages, stream=False, thinking_budget=200):
         if isinstance(part, dict):
             print("思考过程:", part["thoughts"])
             print("最终回答:", part["text"])
@@ -621,7 +621,7 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    async for part in api.chat(messages, stream=True, thinking_budget=24576):
+    async for part in api.chat(messages, stream=True, thinking_budget=200):
         if isinstance(part, dict) and "thoughts" in part:
             print("思考过程:", part["thoughts"])
         else:
