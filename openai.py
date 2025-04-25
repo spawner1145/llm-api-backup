@@ -24,7 +24,7 @@ class OpenAIAPI:
         apikey: str,
         baseurl: str = "https://api-inference.modelscope.cn",
         model: str = "deepseek-ai/DeepSeek-R1",
-        proxy: Optional[Dict[str, str]] = None
+        proxies: Optional[Dict[str, str]] = None
     ):
         self.apikey = apikey
         self.baseurl = baseurl.rstrip('/')
@@ -32,7 +32,7 @@ class OpenAIAPI:
         self.client = AsyncOpenAI(
             api_key=apikey,
             base_url=baseurl,
-            http_client=httpx.AsyncClient(proxies=proxy, timeout=60.0) if proxy else None
+            http_client=httpx.AsyncClient(proxies=proxies, timeout=60.0) if proxies else None
         )
 
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
@@ -537,7 +537,7 @@ async def main():
         apikey="",
         baseurl="https://api-inference.modelscope.cn/v1/",
         model="deepseek-ai/DeepSeek-R1",
-        proxy={
+        proxies={
             "http://": "http://127.0.0.1:7890",
             "https://": "http://127.0.0.1:7890"
         }
