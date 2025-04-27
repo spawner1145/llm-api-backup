@@ -370,7 +370,7 @@ class OpenAIAPI:
                                 messages.append(tool_message)
                             second_request_params = request_params.copy()
                             second_request_params["messages"] = api_messages
-                            second_request_params["stream"] = False
+                            second_request_params["stream"] = True
                             try:
                                 response = await self.client.chat.completions.create(**second_request_params)
                                 choice = response.choices[0]
