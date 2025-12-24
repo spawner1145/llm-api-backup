@@ -183,66 +183,38 @@ class GeminiAPI:
         tools: Dict[str, Callable],
         tool_fixed_params: Optional[Dict[str, Dict]] = None
     ) -> List[Dict]:
-        """执行工具调用并返回响应"""
-        function_responses = []
-        for function_call in function_calls:
+        async def run_single_tool(function_call):
             name = function_call["name"]
             args = function_call.get("args", {})
-            logger.info(f"执行工具调用: {name}, 动态参数: {args}")
             func = tools.get(name)
-            if func:
-                try:
-                    # 获取固定参数（优先使用工具特定的固定参数，若无则使用 "all"）
-                    fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
-                    # 合并固定参数和动态参数
-                    combined_args = {**fixed_params, **args}
-                    logger.info(f"合并后的参数: {combined_args}")
-                    if asyncio.iscoroutinefunction(func):
-                        result = await func(**combined_args)
-                    else:
-                        result = func(**combined_args)
-                    function_response = {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": name,
-                                    "response": {"result": str(result)}
-                                }
-                            }
-                        ]
-                    }
-                    function_responses.append(function_response)
-                except Exception as e:
-                    result = f"函数 {name} 执行失败: {str(e)}"
-                    logger.error(result)
-                    function_response = {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "functionResponse": {
-                                    "name": name,
-                                    "response": {"error": result}
-                                }
-                            }
-                        ]
-                    }
-                    function_responses.append(function_response)
-            else:
-                logger.error(f"工具 {name} 未定义")
-                function_response = {
+            
+            if not func:
+                return {
                     "role": "user",
-                    "parts": [
-                        {
-                            "functionResponse": {
-                                "name": name,
-                                "response": {"error": f"工具 {name} 未定义"}
-                            }
-                        }
-                    ]
+                    "parts": [{"functionResponse": {"name": name, "response": {"error": f"工具 {name} 未定义"}}}]
                 }
-                function_responses.append(function_response)
-        return function_responses
+            try:
+                fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
+                combined_args = {**fixed_params, **args}
+                
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(**combined_args)
+                else:
+                    result = await asyncio.to_thread(func, **combined_args)
+                    
+                return {
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": name, "response": {"result": str(result)}}}]
+                }
+            except Exception as e:
+                return {
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": name, "response": {"error": str(e)}}}]
+                }
+        tasks = [run_single_tool(call) for call in function_calls]
+        function_responses = await asyncio.gather(*tasks)
+        
+        return list(function_responses)
 
     async def _chat_api(
         self,
@@ -254,7 +226,9 @@ class GeminiAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
+        include_thoughts: Optional[bool] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         topk: Optional[int] = None,
         candidate_count: Optional[int] = None,
         presence_penalty: Optional[float] = None,
@@ -270,10 +244,6 @@ class GeminiAPI:
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict], None]:
         """核心 API 调用逻辑，支持所有 Gemini 模型参数"""
-        if thinking_budget is not None:
-            if not isinstance(thinking_budget, int) or thinking_budget < 0 or thinking_budget > 24576:
-                raise ValueError("thinking_budget 必须是 0 到 24576 之间的整数")
-
         if topp is not None and (topp < 0 or topp > 1):
             raise ValueError("topP 必须在 0 到 1 之间")
         if temperature is not None and (temperature < 0 or temperature > 2):
@@ -291,14 +261,12 @@ class GeminiAPI:
         if logprobs is not None and (logprobs < 0 or logprobs > 5):
             raise ValueError("logprobs 必须在 0 到 5 之间")
 
-        # 更新类的 tools 属性
         if tools:
             self.tools = tools
 
         body = {"contents": api_contents}
         if tools:
             function_declarations = []
-            # 获取全局固定参数（如果存在）
             fixed_params = tool_fixed_params.get("all", {}) if tool_fixed_params else {}
             for name, func in tools.items():
                 params = []
@@ -306,7 +274,6 @@ class GeminiAPI:
                     params = func.__code__.co_varnames[:func.__code__.co_argcount]
                 else:
                     logger.warning(f"函数 {name} 没有 __code__ 属性，使用空参数列表")
-                # 排除固定参数，仅声明动态参数
                 dynamic_params = [p for p in params if p not in fixed_params]
                 parameters = {
                     "type": "object",
@@ -341,10 +308,11 @@ class GeminiAPI:
             generation_config["frequencyPenalty"] = frequency_penalty
         if stop_sequences:
             generation_config["stopSequences"] = stop_sequences
-        if response_mime_type:
-            generation_config["responseMimeType"] = response_mime_type
         if response_schema:
+            generation_config["responseMimeType"] = "application/json"
             generation_config["responseSchema"] = response_schema
+        elif response_mime_type:
+            generation_config["responseMimeType"] = response_mime_type
         if seed:
             generation_config["seed"] = seed
         if response_logprobs is not None:
@@ -353,10 +321,12 @@ class GeminiAPI:
             generation_config["logprobs"] = logprobs
         if audio_timestamp is not None:
             generation_config["audioTimestamp"] = audio_timestamp
+        if include_thoughts == True:
+            generation_config.setdefault("thinkingConfig", {})["include_thoughts"] = True
         if thinking_budget is not None:
-            generation_config["thinkingConfig"] = {
-                "thinkingBudget": thinking_budget if thinking_budget is not None else 8192
-            }
+            generation_config.setdefault("thinkingConfig", {})["thinkingBudget"] = thinking_budget
+        if thinking_level is not None:
+            generation_config.setdefault("thinkingConfig", {})["thinkingLevel"] = thinking_level
 
         if generation_config:
             body["generationConfig"] = generation_config
@@ -381,16 +351,15 @@ class GeminiAPI:
                         if data:
                             try:
                                 chunk = json.loads(data)
+                                #print("debug:", chunk)
                                 for candidate in chunk.get("candidates", []):
                                     for part in candidate.get("content", {}).get("parts", []):
-                                        if "text" in part:
-                                            model_message["parts"].append({"text": part["text"]})
+                                        model_message["parts"].append(part)
+                                        if part.get("thought") is True:
+                                            yield {"thought": part.get("text")}
+                                        elif "text" in part:
                                             yield part["text"]
-                                        elif "thoughts" in part:
-                                            model_message["parts"].append({"thoughts": part["thoughts"]})
-                                            yield {"thoughts": part["thoughts"]}
                                         elif "functionCall" in part and tools:
-                                            model_message["parts"].append({"functionCall": part["functionCall"]})
                                             if model_message["parts"]:
                                                 api_contents.append(model_message)
                                             function_calls = [part["functionCall"]]
@@ -401,7 +370,9 @@ class GeminiAPI:
                                                 max_output_tokens=max_output_tokens,
                                                 system_instruction=system_instruction,
                                                 topp=topp, temperature=temperature,
+                                                include_thoughts=include_thoughts,
                                                 thinking_budget=thinking_budget,
+                                                thinking_level=thinking_level,
                                                 topk=topk, candidate_count=candidate_count,
                                                 presence_penalty=presence_penalty,
                                                 frequency_penalty=frequency_penalty,
@@ -426,12 +397,16 @@ class GeminiAPI:
                     logger.info(f"非流式响应状态: {response.status_code}")
                     response.raise_for_status()
                     result = response.json()
+                    #print("debug:", result)
                     candidate = result["candidates"][0]
-                    model_message = {
-                        "role": candidate["content"]["role"],
-                        "parts": candidate["content"]["parts"]
-                    }
+                    model_message = candidate["content"] 
                     api_contents.append(model_message)
+                    parts = model_message.get("parts", [])
+                    for part in parts:
+                        if part.get("thought") is True:
+                            yield {"thought": part.get("text")}
+                        elif "text" in part:
+                            yield part["text"]
                     function_calls = [part["functionCall"] for part in candidate["content"]["parts"] if "functionCall" in part]
                     if function_calls:
                         logger.info(f"发现函数调用: {function_calls}")
@@ -442,7 +417,9 @@ class GeminiAPI:
                             max_output_tokens=max_output_tokens,
                             system_instruction=system_instruction,
                             topp=topp, temperature=temperature,
+                            include_thoughts=include_thoughts,
                             thinking_budget=thinking_budget,
+                            thinking_level=thinking_level,
                             topk=topk, candidate_count=candidate_count,
                             presence_penalty=presence_penalty,
                             frequency_penalty=frequency_penalty,
@@ -454,19 +431,6 @@ class GeminiAPI:
                             safety_settings=safety_settings,
                             retries=retries
                         ):
-                            yield text
-                    else:
-                        parts = candidate["content"]["parts"]
-                        thoughts = [part["thoughts"] for part in parts if "thoughts" in part]
-                        text = "".join(part["text"] for part in parts if "text" in part)
-                        logprobs_data = candidate.get("logprobs", []) if response_logprobs else []
-                        if thoughts or logprobs_data:
-                            yield {
-                                "thoughts": thoughts if thoughts else None,
-                                "text": text,
-                                "logprobs": logprobs_data
-                            }
-                        else:
                             yield text
                     break
                 except httpx.HTTPStatusError as e:
@@ -493,7 +457,9 @@ class GeminiAPI:
         system_instruction: Optional[str] = None,
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
+        include_thoughts: Optional[bool] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         topk: Optional[int] = None,
         candidate_count: Optional[int] = None,
         presence_penalty: Optional[float] = None,
@@ -515,7 +481,6 @@ class GeminiAPI:
         else:
             use_history = True
 
-        # 将用户输入的 messages 转换为 API 所需的 api_contents 格式
         api_contents = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
@@ -530,22 +495,28 @@ class GeminiAPI:
             api_contents.append({"role": role, "parts": parts})
 
         full_text = ""
-        thoughts = []
+        thought = []
         logprobs_data = []
         async for part in self._chat_api(
             api_contents, stream, tools, tool_fixed_params,
-            max_output_tokens, system_instruction, topp, temperature, thinking_budget,
+            max_output_tokens, system_instruction, topp, temperature, include_thoughts, thinking_budget, thinking_level,
             topk, candidate_count, presence_penalty, frequency_penalty,
             stop_sequences, response_mime_type, response_schema,
             seed, response_logprobs, logprobs, audio_timestamp,
             safety_settings, retries
         ):
             if isinstance(part, dict):
-                if "thoughts" in part and part["thoughts"]:
-                    thoughts.extend(part["thoughts"] if isinstance(part["thoughts"], list) else [part["thoughts"]])
+                if "text" in part:
+                    if not part.get("thought"): 
+                        full_text += part["text"]
+                
+                if "thought" in part and part["thought"]:
+                    val = part["thought"]
+                    thought.extend(val if isinstance(val, list) else [val])
+                
                 if "logprobs" in part and part["logprobs"]:
                     logprobs_data.extend(part["logprobs"])
-                full_text += part["text"]
+                
                 yield part
             else:
                 full_text += part
@@ -555,25 +526,12 @@ class GeminiAPI:
         if use_history:
             messages.clear()
             for content in api_contents:
-                parts = []
-                text_parts = [part["text"] for part in content["parts"] if "text" in part]
-                if text_parts:
-                    parts.append({"text": "".join(text_parts)})
-                for part in content["parts"]:
-                    if "fileData" in part:
-                        parts.append({"fileData": part["fileData"]})
-                    elif "inlineData" in part:
-                        parts.append({"inlineData": part["inlineData"]})
-                    elif "functionCall" in part:
-                        parts.append({"functionCall": part["functionCall"]})
-                    elif "functionResponse" in part:
-                        parts.append({"functionResponse": part["functionResponse"]})
-                    elif "thoughts" in part:
-                        parts.append({"thoughts": part["thoughts"]})
-                    elif "logprobs" in part:
-                        parts.append({"logprobs": part["logprobs"]})
-                role = "user" if content["role"] == "user" else "assistant"
-                messages.append({"role": role, "parts": parts})
+                # role 映射：API 返回 "model"，前端习惯用 "assistant"
+                role = "assistant" if content["role"] == "model" else "user"
+                messages.append({
+                    "role": role,
+                    "parts": content["parts"] # 直接引用原始 parts 列表，包含所有签名和标记
+                })
 
     async def __aenter__(self):
         return self
@@ -599,7 +557,20 @@ async def get_time(event: str, config: Dict, city: str) -> str:
 
 # 主函数
 async def main():
-    api = GeminiAPI(apikey="")  # 请替换为你的实际 API 密钥
+    PROXY = 'http://127.0.0.1:7890'
+    if PROXY and PROXY.strip():
+        proxies = {
+            "http://": PROXY,
+            "https://": PROXY
+        }
+    else:
+        proxies = None
+    api = GeminiAPI(
+        apikey="",
+        model='gemini-3-flash-preview',
+        proxies=proxies,
+        baseurl="https://generativelanguage.googleapis.com"
+    )
     tools = {
         "schedule_meeting": schedule_meeting,
         "get_weather": get_weather,
@@ -679,9 +650,11 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    async for part in api.chat(messages, stream=True, thinking_budget=200):
-        if isinstance(part, dict) and "thoughts" in part:
-            print("思考过程:", part["thoughts"])
+    # include_thoughts表示是否返回思维链，一般是开的，-1thinking_budget表示模型自由决定思考token，如果说gemini3系列的用thinking_level，有"minimal"、"low"、"medium" 和 "high"，默认是"high"的
+    # 设置了thinking_budget或者thinking_level后，最好开启include_thoughts，这样可以看到思考过程，否则api不会返回思维链
+    async for part in api.chat(messages, stream=True, include_thoughts=True, thinking_budget=-1):
+        if isinstance(part, dict) and "thought" in part:
+            print("思考过程:", part["thought"]) # 这边代表单独提取思维链的内容
         else:
             print("流式输出:", part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
@@ -692,26 +665,30 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
+    # 必须要thinking_budget=0，include_thoughts不影响是否思考，gemini3好像思考关不掉的
     async for part in api.chat(messages, stream=False, thinking_budget=0):
         print("最终回答:", part)
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
     # 示例 9：结构化输出（非流式，使用 response_schema）
-    print("示例 9：结构化输出（非流式，使用 response_schema）")
+    print("示例 9：结构化输出")
     schema = {
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"}
+            "name": {"type": "string", "description": "用户的姓名"},
+            "age": {"type": "integer", "description": "用户的年龄"}
         },
-        "required": ["name", "age"]
+        "required": ["name", "age"],
+        # 字段顺序
+        "propertyOrdering": ["name", "age"]
     }
-    messages = [
-        {"role": "user", "parts": [{"text": "请提供一个人的信息，包括姓名和年龄。"}]}
-    ]
+    messages = [{"role": "user", "parts": [{"text": "生成一个虚构的人物信息"}]}]
+    
     async for part in api.chat(
-        messages, stream=False, response_mime_type="application/json", response_schema=schema
+        messages, 
+        stream=False, 
+        response_schema=schema # 具体的结构化格式
     ):
         print("结构化输出:", part)
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
