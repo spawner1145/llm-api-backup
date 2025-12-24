@@ -664,7 +664,7 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    # 必须要thinking_budget=0，include_thoughts不影响是否思考，gemini3好像思考关不掉的
+    # 必须要thinking_budget=0，include_thoughts不影响是否思考，gemini3好像思考关不掉的，并且gemini3要带上thinking_level='minimal'
     async for part in api.chat(messages, stream=False, thinking_budget=0):
         print("最终回答:", part)
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
