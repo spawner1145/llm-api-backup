@@ -639,8 +639,6 @@ async def main():
     async for part in api.chat(messages, stream=False, include_thoughts=True, thinking_budget=-1):
         if isinstance(part, dict) and "thought" in part:
             print("思考过程:", part["thought"]) # 这边代表单独提取思维链的内容
-            if part["logprobs"]:
-                print("Logprobs:", part["logprobs"])
         else:
             print(part)
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
