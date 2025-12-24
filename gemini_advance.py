@@ -629,7 +629,7 @@ async def main():
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
-    # 示例 6：思考模式（非流式，启用思考）
+    # 示例 6：思考模式（非流式，启用思考）非常不建议不用流式，不用流式这玩意很容易卡死
     print("示例 6：思考模式（非流式，启用思考）")
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
