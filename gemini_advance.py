@@ -634,10 +634,11 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    async for part in api.chat(messages, stream=False, thinking_budget=200):
-        if isinstance(part, dict):
+    # include_thoughts表示是否返回思维链，一般是开的，-1thinking_budget表示模型自由决定思考token，如果说gemini3系列的用thinking_level，有"minimal"、"low"、"medium" 和 "high"，默认是"high"的
+    # 设置了thinking_budget或者thinking_level后，最好开启include_thoughts，这样可以看到思考过程，否则api不会返回思维链
+    async for part in api.chat(messages, stream=False, include_thoughts=True, thinking_budget=-1):
+        if isinstance(part, dict) and "thought" in part:
             print("思考过程:", part["thoughts"])
-            print("最终回答:", part["text"])
             if part["logprobs"]:
                 print("Logprobs:", part["logprobs"])
         else:
@@ -650,8 +651,6 @@ async def main():
     messages = [
         {"role": "user", "parts": [{"text": "解决数学问题：用数字 10、8、3、7、1 和常用运算符，构造一个表达式等于 24，只能使用每个数字一次。"}]}
     ]
-    # include_thoughts表示是否返回思维链，一般是开的，-1thinking_budget表示模型自由决定思考token，如果说gemini3系列的用thinking_level，有"minimal"、"low"、"medium" 和 "high"，默认是"high"的
-    # 设置了thinking_budget或者thinking_level后，最好开启include_thoughts，这样可以看到思考过程，否则api不会返回思维链
     async for part in api.chat(messages, stream=True, include_thoughts=True, thinking_budget=-1):
         if isinstance(part, dict) and "thought" in part:
             print("思考过程:", part["thought"]) # 这边代表单独提取思维链的内容
