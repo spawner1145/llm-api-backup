@@ -125,57 +125,48 @@ class OpenAIAPI:
 
     async def _execute_tool(
         self,
-        tool_calls: List[Dict],
+        tool_calls: List[Union[Dict, any]],
         tools: Dict[str, Callable],
         tool_fixed_params: Optional[Dict[str, Dict]] = None
     ) -> List[Dict]:
-        """执行工具调用并返回响应，遵循 OpenAI 格式"""
-        tool_responses = []
-        for tool_call in tool_calls:
-            name = tool_call.function.name
-            if not name:
-                logger.error(f"工具调用缺少名称: {tool_call}")
-                continue
-            tool_call_id = tool_call.id or f"call_{uuid.uuid4()}"
-            args = json.loads(tool_call.function.arguments)
-            logger.info(f"执行工具调用: {name}, 动态参数: {args}, ID: {tool_call_id}")
-            func = tools.get(name)
-            if func:
-                try:
-                    # 获取固定参数（优先使用工具特定的固定参数，若无则使用 "all"）
-                    fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
-                    # 合并固定参数和动态参数
-                    combined_args = {**fixed_params, **args}
-                    logger.info(f"合并后的参数: {combined_args}")
-                    if asyncio.iscoroutinefunction(func):
-                        result = await func(**combined_args)
-                    else:
-                        result = func(**combined_args)
-                    logger.info(f"工具结果: {name} 返回 {result}, ID: {tool_call_id}")
-                    tool_response = {
-                        "role": "tool",
-                        "content": json.dumps(result),
-                        "tool_call_id": tool_call_id
-                    }
-                    tool_responses.append((tool_response, tool_call_id))
-                except Exception as e:
-                    result = f"函数 {name} 执行失败: {str(e)}"
-                    logger.error(f"工具错误: {result}, ID: {tool_call_id}")
-                    tool_response = {
-                        "role": "tool",
-                        "content": json.dumps({"error": result}),
-                        "tool_call_id": tool_call_id
-                    }
-                    tool_responses.append((tool_response, tool_call_id))
+        async def run_single_tool(tool_call):
+            if isinstance(tool_call, dict):
+                name = tool_call["function"]["name"]
+                arguments = tool_call["function"]["arguments"]
+                tool_call_id = tool_call.get("id")
             else:
-                logger.error(f"未找到工具: {name}, ID: {tool_call_id}")
-                tool_response = {
+                name = tool_call.function.name
+                arguments = tool_call.function.arguments
+                tool_call_id = tool_call.id
+            
+            tool_call_id = tool_call_id or f"call_{uuid.uuid4()}"
+            
+            try:
+                args = json.loads(arguments)
+                func = tools.get(name)
+                
+                if not func:
+                    return {"role": "tool", "content": json.dumps({"error": f"未找到工具 {name}"}), "tool_call_id": tool_call_id}
+
+                fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
+                combined_args = {**fixed_params, **args}
+                
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(**combined_args)
+                else:
+                    result = await asyncio.to_thread(func, **combined_args)
+                
+                return {
                     "role": "tool",
-                    "content": json.dumps({"error": f"未找到工具 {name}"}),
+                    "content": json.dumps(result, ensure_ascii=False),
                     "tool_call_id": tool_call_id
                 }
-                tool_responses.append((tool_response, tool_call_id))
-        return tool_responses
+            except Exception as e:
+                logger.error(f"工具 {name} 执行失败: {str(e)}")
+                return {"role": "tool", "content": json.dumps({"error": str(e)}, ensure_ascii=False), "tool_call_id": tool_call_id}
+
+        tasks = [run_single_tool(tc) for tc in tool_calls]
+        return list(await asyncio.gather(*tasks))
 
     async def _chat_api(
         self,
@@ -358,27 +349,14 @@ class OpenAIAPI:
                             }
                             api_messages.append(assistant_message)
                             messages.append(assistant_message)
-                            tool_responses = await self._execute_tool(
-                                [
-                                    type('ToolCall', (), {
-                                        'id': tc["id"],
-                                        'function': type('Function', (), {
-                                            'name': tc["function"]["name"],
-                                            'arguments': tc["function"]["arguments"]
-                                        })()
-                                    })() for tc in tool_calls_buffer
-                                ],
-                                tools,
+                            tool_messages = await self._execute_tool(
+                                tool_calls_buffer, 
+                                tools, 
                                 tool_fixed_params
                             )
-                            for tool_response, tool_call_id in tool_responses:
-                                tool_message = {
-                                    "role": "tool",
-                                    "content": tool_response["content"],
-                                    "tool_call_id": tool_call_id
-                                }
-                                api_messages.append(tool_message)
-                                messages.append(tool_message)
+                            
+                            api_messages.extend(tool_messages)
+                            messages.extend(tool_messages)
                             second_request_params = request_params.copy()
                             second_request_params["messages"] = api_messages
                             second_request_params["stream"] = True
@@ -437,15 +415,9 @@ class OpenAIAPI:
                         }
                         api_messages.append(assistant_message)
                         messages.append(assistant_message)
-                        tool_responses = await self._execute_tool(message.tool_calls, tools, tool_fixed_params)
-                        for tool_response, tool_call_id in tool_responses:
-                            tool_message = {
-                                "role": "tool",
-                                "content": tool_response["content"],
-                                "tool_call_id": tool_call_id
-                            }
-                            api_messages.append(tool_message)
-                            messages.append(tool_message)
+                        tool_messages = await self._execute_tool(message.tool_calls, tools, tool_fixed_params)
+                        api_messages.extend(tool_messages)
+                        messages.extend(tool_messages)
                         second_request_params = request_params.copy()
                         second_request_params["messages"] = api_messages
                         second_request_params["stream"] = False
