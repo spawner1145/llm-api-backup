@@ -638,7 +638,7 @@ async def main():
     # 设置了thinking_budget或者thinking_level后，最好开启include_thoughts，这样可以看到思考过程，否则api不会返回思维链
     async for part in api.chat(messages, stream=False, include_thoughts=True, thinking_budget=-1):
         if isinstance(part, dict) and "thought" in part:
-            print("思考过程:", part["thoughts"])
+            print("思考过程:", part["thought"]) # 这边代表单独提取思维链的内容
             if part["logprobs"]:
                 print("Logprobs:", part["logprobs"])
         else:
