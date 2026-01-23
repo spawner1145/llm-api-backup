@@ -591,8 +591,8 @@ class GeminiAPI:
                 if "logprobs" in part and part["logprobs"]:
                     logprobs_data.extend(part["logprobs"])
                 
-                if "groundingMetadata" in part:
-                    grounding_metadata = part["groundingMetadata"]
+                if "grounding_metadata" in part:
+                    grounding_metadata = part["grounding_metadata"]
                 
                 yield part
             else:
