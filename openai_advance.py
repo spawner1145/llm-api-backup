@@ -34,34 +34,6 @@ class OpenAIAPI:
             http_client=httpx.AsyncClient(proxies=proxies, timeout=60.0) if proxies else None
         )
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
         """上传单个文件，使用 client.files.create，目的为 user_data"""
         try:
@@ -166,24 +138,24 @@ class OpenAIAPI:
                 name = tool_call.function.name
                 arguments = tool_call.function.arguments
                 tool_call_id = tool_call.id
-
+            
             tool_call_id = tool_call_id or f"call_{uuid.uuid4()}"
-
+            
             try:
                 args = json.loads(arguments)
                 func = tools.get(name)
-
+                
                 if not func:
                     return {"role": "tool", "content": json.dumps({"error": f"未找到工具 {name}"}), "tool_call_id": tool_call_id}
 
                 fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
                 combined_args = {**fixed_params, **args}
-
+                
                 if asyncio.iscoroutinefunction(func):
                     result = await func(**combined_args)
                 else:
                     result = await asyncio.to_thread(func, **combined_args)
-
+                
                 return {
                     "role": "tool",
                     "content": json.dumps(result, ensure_ascii=False),
@@ -217,8 +189,6 @@ class OpenAIAPI:
     ) -> AsyncGenerator[str, None]:
         """核心 API 调用逻辑，遵循 OpenAI 标准，支持 reasoning_content 但不记录到历史"""
         original_model = self.model
-
-
 
         # 验证参数
         if topp is not None and (topp < 0 or topp > 1):
@@ -312,8 +282,6 @@ class OpenAIAPI:
 
         if tools is not None:
             tool_definitions = []
-
-
             # 获取全局固定参数（如果存在）
             fixed_params = tool_fixed_params.get("all", {}) if tool_fixed_params else {}
             for name, func in tools.items():
@@ -386,7 +354,7 @@ class OpenAIAPI:
                                 tools, 
                                 tool_fixed_params
                             )
-
+                            
                             api_messages.extend(tool_messages)
                             messages.extend(tool_messages)
                             second_request_params = request_params.copy()
@@ -633,9 +601,6 @@ async def main():
     ]
     async for part in api.chat(messages, stream=True, max_output_tokens=500):
         print(part, end="", flush=True)
-
-
-
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
