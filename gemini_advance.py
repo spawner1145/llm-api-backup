@@ -341,10 +341,10 @@ class GeminiAPI:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         if safety_settings is None:
             body["safetySettings"] = [
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_None"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_None"},
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_None"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_None"}
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ]
         else:
             body["safetySettings"] = safety_settings
