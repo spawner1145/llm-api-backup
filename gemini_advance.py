@@ -12,6 +12,45 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def format_grounding_metadata(grounding_metadata: Dict) -> str:
+    if not grounding_metadata:
+        return ""
+    
+    parts = []
+    
+    # 搜索查询
+    if "webSearchQueries" in grounding_metadata:
+        queries = grounding_metadata["webSearchQueries"]
+        if queries:
+            parts.append("搜索查询:")
+            for q in queries:
+                parts.append(f" - {q}")
+    
+    # 搜索来源
+    if "groundingChunks" in grounding_metadata:
+        chunks = grounding_metadata["groundingChunks"]
+        if chunks:
+            parts.append("\n参考来源:")
+            seen_uris = set()
+            for chunk in chunks:
+                web = chunk.get("web", {})
+                uri = web.get("uri", "")
+                title = web.get("title", "未知标题")
+                if uri and uri not in seen_uris:
+                    seen_uris.add(uri)
+                    parts.append(f" - [{title}]({uri})")
+    
+    # Google 搜索链接
+    if "searchEntryPoint" in grounding_metadata:
+        entry = grounding_metadata["searchEntryPoint"]
+        rendered_content = entry.get("renderedContent", "")
+        if rendered_content:
+            parts.append("\n可通过 Google 搜索查看更多结果")
+    
+    return "\n".join(parts)
+
+
 class GeminiAPI:
     def __init__(
         self,
@@ -241,9 +280,11 @@ class GeminiAPI:
         logprobs: Optional[int] = None,
         audio_timestamp: Optional[bool] = None,
         safety_settings: Optional[List[Dict]] = None,
+        google_search: bool = False,
+        url_context: bool = False,
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict], None]:
-        """核心 API 调用逻辑，支持所有 Gemini 模型参数"""
+        """核心 API 调用逻辑"""
         if topp is not None and (topp < 0 or topp > 1):
             raise ValueError("topP 必须在 0 到 1 之间")
         if temperature is not None and (temperature < 0 or temperature > 2):
@@ -265,6 +306,13 @@ class GeminiAPI:
             self.tools = tools
 
         body = {"contents": api_contents}
+        
+        api_tools = []
+
+        if google_search:
+            api_tools.append({"google_search": {}})
+        if url_context:
+            api_tools.append({"url_context": {}})
         if tools:
             function_declarations = []
             fixed_params = tool_fixed_params.get("all", {}) if tool_fixed_params else {}
@@ -285,7 +333,10 @@ class GeminiAPI:
                     "description": getattr(func, "__doc__", f"调用 {name} 函数"),
                     "parameters": parameters
                 })
-            body["tools"] = [{"functionDeclarations": function_declarations}]
+            api_tools.append({"functionDeclarations": function_declarations})
+        
+        if api_tools:
+            body["tools"] = api_tools
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         if safety_settings is None:
@@ -389,10 +440,14 @@ class GeminiAPI:
                                                 seed=seed, response_logprobs=response_logprobs,
                                                 logprobs=logprobs, audio_timestamp=audio_timestamp,
                                                 safety_settings=safety_settings,
+                                                google_search=google_search,
+                                                url_context=url_context,
                                                 retries=retries
                                             ):
                                                 yield text
                                             model_message = {"role": "model", "parts": []}
+                                    if "groundingMetadata" in candidate:
+                                        yield {"grounding_metadata": candidate["groundingMetadata"]}
                             except json.JSONDecodeError as e:
                                 logger.error(f"流式 JSON 解析错误: {e}")
                 if model_message["parts"] and not any("functionCall" in part for part in model_message["parts"]):
@@ -414,6 +469,12 @@ class GeminiAPI:
                             yield {"thought": part.get("text")}
                         elif "text" in part:
                             yield part["text"]
+                    
+                    # 解析并返回 groundingMetadata（如果存在）
+                    if "groundingMetadata" in candidate:
+                        grounding_metadata = candidate["groundingMetadata"]
+                        yield {"grounding_metadata": grounding_metadata}
+                    
                     function_calls = [part["functionCall"] for part in candidate["content"]["parts"] if "functionCall" in part]
                     if function_calls:
                         logger.info(f"发现函数调用: {function_calls}")
@@ -436,6 +497,8 @@ class GeminiAPI:
                             seed=seed, response_logprobs=response_logprobs,
                             logprobs=logprobs, audio_timestamp=audio_timestamp,
                             safety_settings=safety_settings,
+                            google_search=google_search,
+                            url_context=url_context,
                             retries=retries
                         ):
                             yield text
@@ -480,9 +543,11 @@ class GeminiAPI:
         logprobs: Optional[int] = None,
         audio_timestamp: Optional[bool] = None,
         safety_settings: Optional[List[Dict]] = None,
+        google_search: bool = False,
+        url_context: bool = False,
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict, List[Dict[str, any]]], None]:
-        """发起聊天请求，支持多文件上传和多内联内容"""
+        """发起聊天请求"""
         if isinstance(messages, str):
             messages = [{"role": "user", "parts": [{"text": messages}]}]
             use_history = False
@@ -505,13 +570,14 @@ class GeminiAPI:
         full_text = ""
         thought = []
         logprobs_data = []
+        grounding_metadata = None
         async for part in self._chat_api(
             api_contents, stream, tools, tool_fixed_params,
             max_output_tokens, system_instruction, topp, temperature, include_thoughts, thinking_budget, thinking_level,
             topk, candidate_count, presence_penalty, frequency_penalty,
             stop_sequences, response_mime_type, response_schema,
             seed, response_logprobs, logprobs, audio_timestamp,
-            safety_settings, retries
+            safety_settings, google_search, url_context, retries
         ):
             if isinstance(part, dict):
                 if "text" in part:
@@ -524,6 +590,9 @@ class GeminiAPI:
                 
                 if "logprobs" in part and part["logprobs"]:
                     logprobs_data.extend(part["logprobs"])
+                
+                if "groundingMetadata" in part:
+                    grounding_metadata = part["groundingMetadata"]
                 
                 yield part
             else:
@@ -682,8 +751,65 @@ async def main():
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
-    # 示例 9：结构化输出（非流式，使用 response_schema）
-    print("示例 9：结构化输出")
+    # 示例 9：Google 搜索（非流式，使用 google_search 工具）
+    print("示例 9：Google 搜索（非流式）")
+    messages = [
+        {"role": "user", "parts": [{"text": "2024年诺贝尔物理学奖授予了谁？"}]}
+    ]
+    async for part in api.chat(messages, stream=False, google_search=True):
+        if isinstance(part, dict) and "grounding_metadata" in part:
+            # 使用辅助函数格式化 grounding metadata
+            formatted = format_grounding_metadata(part["grounding_metadata"])
+            print("搜索来源信息:\n", formatted)
+        else:
+            print("回答:", part)
+    print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
+
+    # 示例 10：Google 搜索（流式）
+    print("示例 10：Google 搜索（流式）")
+    messages = [
+        {"role": "user", "parts": [{"text": "最新的AI发展趋势是什么？"}]}
+    ]
+    async for part in api.chat(messages, stream=True, google_search=True):
+        if isinstance(part, dict) and "grounding_metadata" in part:
+            formatted = format_grounding_metadata(part["grounding_metadata"])
+            print("\n搜索来源信息:\n", formatted)
+        else:
+            print(part, end="", flush=True)
+    print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
+
+    # 示例 11：URL 上下文（非流式，使用 url_context 工具抓取 URL 内容）
+    print("示例 11：URL 上下文（非流式）")
+    messages = [
+        {"role": "user", "parts": [{"text": "总结这个网页的内容：https://blog.google/technology/ai/google-gemini-ai/"}]}
+    ]
+    async for part in api.chat(messages, stream=False, url_context=True):
+        if isinstance(part, dict) and "grounding_metadata" in part:
+            formatted = format_grounding_metadata(part["grounding_metadata"])
+            print("URL 来源信息:\n", formatted)
+        else:
+            print("回答:", part)
+    print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
+
+    # 示例 12：同时启用 Google 搜索和 URL 上下文
+    print("示例 12：同时启用 Google 搜索和 URL 上下文")
+    messages = [
+        {"role": "user", "parts": [{"text": "查看 https://www.python.org/ 并告诉我 Python 最新版本，同时搜索 Python 3.12 的新特性"}]}
+    ]
+    async for part in api.chat(messages, stream=False, google_search=True, url_context=True):
+        if isinstance(part, dict) and "grounding_metadata" in part:
+            formatted = format_grounding_metadata(part["grounding_metadata"])
+            print("来源信息:\n", formatted)
+        else:
+            print("回答:", part)
+    print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
+    print()
+
+    # 示例 13：结构化输出（非流式，使用 response_schema）
+    print("示例 13：结构化输出")
     schema = {
         "type": "object",
         "properties": {
@@ -705,8 +831,8 @@ async def main():
     print("更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
-    # 示例 11：并行使用 File API 上传多个图像并生成描述（非流式）
-    print("示例 11：并行使用 File API 上传多个图像并生成描述（非流式）")
+    # 示例 14：并行使用 File API 上传多个图像并生成描述（非流式）
+    print("示例 14：并行使用 File API 上传多个图像并生成描述（非流式）")
     try:
         image_files = ["image1.jpg", "image2.png"]  # 请替换为实际图像路径
         file_data_list = await api.upload_files(image_files, display_names=["Image 1", "Image 2"])
@@ -727,8 +853,8 @@ async def main():
         print(f"文件不存在: {e}")
     print()
 
-    # 示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）
-    print("示例 12：并行使用 File API 上传图像和视频并总结内容（非流式）")
+    # 示例 15：并行使用 File API 上传图像和视频并总结内容（非流式）
+    print("示例 15：并行使用 File API 上传图像和视频并总结内容（非流式）")
     try:
         media_files = ["image1.jpg", "video1.mp4"]  # 请替换为实际文件路径
         file_data_list = await api.upload_files(media_files, display_names=["Image 1", "Video 1"])
@@ -749,8 +875,8 @@ async def main():
         print(f"文件不存在: {e}")
     print()
 
-    # 示例 13：使用多个内联 Base64 图像生成描述（非流式）
-    print("示例 13：使用多个内联 Base64 图像生成描述（非流式）")
+    # 示例 16：使用多个内联 Base64 图像生成描述（非流式）
+    print("示例 16：使用多个内联 Base64 图像生成描述（非流式）")
     try:
         image_files = ["image1.jpg", "image2.png"]  # 请替换为实际小图像路径（<10MB）
         inline_data_list = await api.prepare_inline_data_batch(image_files)
@@ -770,8 +896,8 @@ async def main():
         print(f"内联数据错误: {e}")
     print()
 
-    # 示例 14：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）
-    print("示例 14：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）")
+    # 示例 17：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）
+    print("示例 17：混合并行上传文件和多内联数据（文本文件 + 多图像，非流式）")
     try:
         text_files = ["requirements.txt"]  # 请替换为实际文本文件路径
         image_files = ["image1.jpg", "image2.png"]  # 请替换为实际小图像路径（<10MB）
