@@ -557,8 +557,9 @@ async def main():
     messages = [{"role": "user", "content": [{"type": "text", "text": "法国的首都是哪里？"}]}]
     async for part in api.chat(messages, stream=False):
         if isinstance(part, dict) and "thought" in part:
-            continue
-        print(part, end="", flush=True)
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -571,8 +572,9 @@ async def main():
     ]
     async for part in api.chat(messages, stream=False):
         if isinstance(part, dict) and "thought" in part:
-            continue
-        print(part, end="", flush=True)
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -581,8 +583,9 @@ async def main():
     messages = [{"role": "user", "content": [{"type": "text", "text": "讲一个关于魔法背包的故事。"}]}]
     async for part in api.chat(messages, stream=True):
         if isinstance(part, dict) and "thought" in part:
-            continue
-        print(part, end="", flush=True)
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -593,8 +596,9 @@ async def main():
     ]
     async for part in api.chat(messages, stream=True, tools=tools, tool_fixed_params=tool_fixed_params, presence_penalty=0.5):
         if isinstance(part, dict) and "thought" in part:
-            continue
-        print(part, end="", flush=True)
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -605,8 +609,9 @@ async def main():
     ]
     async for part in api.chat(messages, stream=True, tools=tools, tool_fixed_params=tool_fixed_params):
         if isinstance(part, dict) and "thought" in part:
-            continue
-        print(part, end="", flush=True)
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
