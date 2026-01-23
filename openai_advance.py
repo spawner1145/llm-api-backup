@@ -34,33 +34,33 @@ class OpenAIAPI:
             http_client=httpx.AsyncClient(proxies=proxies, timeout=60.0) if proxies else None
         )
 
-    def _normalize_tools(
-        self,
-        tools: Optional[Union[Dict[str, Callable], List[Dict], Dict]]
-    ) -> tuple[Optional[Dict[str, Callable]], Optional[List[Dict]]]:
-        """
-        兼容两种工具加载方式：
-        1) 新版：{name: callable} 的工具映射（可执行工具）
-        2) 旧版：OpenAI tools 列表，或 Gemini 的 function_declarations
-        """
-        if tools is None:
-            return None, None
 
-        if isinstance(tools, dict):
-            if "function_declarations" in tools:
-                try:
-                    from framework_common.utils.convert_func_calling import convert_gemini_to_openai
-                    return None, convert_gemini_to_openai(tools)
-                except Exception:
-                    return None, None
-            if all(callable(v) for v in tools.values()):
-                return tools, None
-            return None, None
 
-        if isinstance(tools, list):
-            return None, tools
 
-        return None, None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
         """上传单个文件，使用 client.files.create，目的为 user_data"""
@@ -166,24 +166,24 @@ class OpenAIAPI:
                 name = tool_call.function.name
                 arguments = tool_call.function.arguments
                 tool_call_id = tool_call.id
-            
+
             tool_call_id = tool_call_id or f"call_{uuid.uuid4()}"
-            
+
             try:
                 args = json.loads(arguments)
                 func = tools.get(name)
-                
+
                 if not func:
                     return {"role": "tool", "content": json.dumps({"error": f"未找到工具 {name}"}), "tool_call_id": tool_call_id}
 
                 fixed_params = tool_fixed_params.get(name, tool_fixed_params.get("all", {})) if tool_fixed_params else {}
                 combined_args = {**fixed_params, **args}
-                
+
                 if asyncio.iscoroutinefunction(func):
                     result = await func(**combined_args)
                 else:
                     result = await asyncio.to_thread(func, **combined_args)
-                
+
                 return {
                     "role": "tool",
                     "content": json.dumps(result, ensure_ascii=False),
@@ -218,7 +218,7 @@ class OpenAIAPI:
         """核心 API 调用逻辑，遵循 OpenAI 标准，支持 reasoning_content 但不记录到历史"""
         original_model = self.model
 
-        callable_tools, tool_definitions = self._normalize_tools(tools)
+
 
         # 验证参数
         if topp is not None and (topp < 0 or topp > 1):
@@ -310,13 +310,13 @@ class OpenAIAPI:
         if response_format:
             request_params["response_format"] = response_format
 
-        if tool_definitions is not None:
-            request_params["tools"] = tool_definitions
-        elif callable_tools is not None:
-            generated_tool_definitions = []
+        if tools is not None:
+            tool_definitions = []
+
+
             # 获取全局固定参数（如果存在）
             fixed_params = tool_fixed_params.get("all", {}) if tool_fixed_params else {}
-            for name, func in callable_tools.items():
+            for name, func in tools.items():
                 params = {
                     "type": "object",
                     "properties": {},
@@ -333,7 +333,7 @@ class OpenAIAPI:
                 else:
                     params["properties"] = {"arg": {"type": "string"}}
                     params["required"] = ["arg"]
-                generated_tool_definitions.append({
+                tool_definitions.append({
                     "type": "function",
                     "function": {
                         "name": name,
@@ -341,7 +341,7 @@ class OpenAIAPI:
                         "parameters": params
                     }
                 })
-            request_params["tools"] = generated_tool_definitions
+            request_params["tools"] = tool_definitions
 
         if stream:
             assistant_content = ""
@@ -350,11 +350,11 @@ class OpenAIAPI:
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                        yield {"thought": delta.reasoning_content}
+                        yield f"REASONING: {delta.reasoning_content}"
                     if delta.content:
                         yield delta.content
                         assistant_content += delta.content
-                    elif delta.tool_calls and callable_tools:
+                    elif delta.tool_calls:
                         for tool_call in delta.tool_calls:
                             if tool_call and tool_call.function:
                                 tool_call_id = tool_call.id or f"call_{uuid.uuid4()}"
@@ -383,10 +383,10 @@ class OpenAIAPI:
                             messages.append(assistant_message)
                             tool_messages = await self._execute_tool(
                                 tool_calls_buffer, 
-                                callable_tools, 
+                                tools, 
                                 tool_fixed_params
                             )
-                            
+
                             api_messages.extend(tool_messages)
                             messages.extend(tool_messages)
                             second_request_params = request_params.copy()
@@ -397,7 +397,7 @@ class OpenAIAPI:
                                     if chunk.choices:
                                         delta = chunk.choices[0].delta
                                         if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                                            yield {"thought": delta.reasoning_content}
+                                            yield f"REASONING: {delta.reasoning_content}"
                                         if delta.content:
                                             yield delta.content
                                             assistant_content += delta.content
@@ -429,7 +429,7 @@ class OpenAIAPI:
                     response = await self.client.chat.completions.create(**request_params)
                     choice = response.choices[0]
                     message = choice.message
-                    if message.tool_calls and callable_tools:
+                    if message.tool_calls:
                         tool_calls = [
                             {
                                 "id": tc.id or f"call_{uuid.uuid4()}",
@@ -447,7 +447,7 @@ class OpenAIAPI:
                         }
                         api_messages.append(assistant_message)
                         messages.append(assistant_message)
-                        tool_messages = await self._execute_tool(message.tool_calls, callable_tools, tool_fixed_params)
+                        tool_messages = await self._execute_tool(message.tool_calls, tools, tool_fixed_params)
                         api_messages.extend(tool_messages)
                         messages.extend(tool_messages)
                         second_request_params = request_params.copy()
@@ -462,7 +462,7 @@ class OpenAIAPI:
                         }
                         messages.append(assistant_message)
                         if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                            yield {"thought": message.reasoning_content}
+                            yield f"REASONING: {message.reasoning_content}"
                         if message.content:
                             yield message.content
                     else:
@@ -474,12 +474,12 @@ class OpenAIAPI:
                             assistant_message["logprobs"] = choice.logprobs.content
                             messages.append(assistant_message)
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                                yield {"thought": message.reasoning_content}
+                                yield f"REASONING: {message.reasoning_content}"
                             yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
                         else:
                             messages.append(assistant_message)
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                                yield {"thought": message.reasoning_content}
+                                yield f"REASONING: {message.reasoning_content}"
                             if message.content:
                                 yield message.content
                     break
@@ -632,10 +632,10 @@ async def main():
         {"role": "user", "content": [{"type": "text", "text": "你好"}]}
     ]
     async for part in api.chat(messages, stream=True, max_output_tokens=500):
-        if isinstance(part, dict) and "thought" in part:
-            print("思考过程:", part["thought"])
-        else:
-            print(part, end="", flush=True)
+        print(part, end="", flush=True)
+
+
+
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
