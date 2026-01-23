@@ -182,11 +182,12 @@ class OpenAIAPI:
         frequency_penalty: Optional[float] = None,
         stop_sequences: Optional[List[str]] = None,
         response_format: Optional[Dict] = None,
+        reasoning_effort: Optional[str] = None,
         seed: Optional[int] = None,
         response_logprobs: Optional[bool] = None,
         logprobs: Optional[int] = None,
         retries: int = 3
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Union[str, Dict], None]:
         """核心 API 调用逻辑，遵循 OpenAI 标准，支持 reasoning_content 但不记录到历史"""
         original_model = self.model
 
@@ -201,6 +202,8 @@ class OpenAIAPI:
             raise ValueError("frequency_penalty 必须在 -2 到 2 之间")
         if logprobs is not None and (logprobs < 0 or logprobs > 20):
             raise ValueError("logprobs 必须在 0 到 20 之间")
+        if reasoning_effort is not None and reasoning_effort not in ["minimal", "low", "medium", "high"]:
+            raise ValueError("reasoning_effort 必须是 minimal、low、medium 或 high")
 
         # 构造消息
         api_messages = []
@@ -279,6 +282,8 @@ class OpenAIAPI:
                 request_params["top_logprobs"] = logprobs
         if response_format:
             request_params["response_format"] = response_format
+        if reasoning_effort is not None:
+            request_params["reasoning_effort"] = reasoning_effort
 
         if tools is not None:
             tool_definitions = []
@@ -318,7 +323,7 @@ class OpenAIAPI:
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                        yield f"REASONING: {delta.reasoning_content}"
+                        yield {"thought": delta.reasoning_content}
                     if delta.content:
                         yield delta.content
                         assistant_content += delta.content
@@ -365,7 +370,7 @@ class OpenAIAPI:
                                     if chunk.choices:
                                         delta = chunk.choices[0].delta
                                         if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                                            yield f"REASONING: {delta.reasoning_content}"
+                                            yield {"thought": delta.reasoning_content}
                                         if delta.content:
                                             yield delta.content
                                             assistant_content += delta.content
@@ -430,7 +435,7 @@ class OpenAIAPI:
                         }
                         messages.append(assistant_message)
                         if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                            yield f"REASONING: {message.reasoning_content}"
+                            yield {"thought": message.reasoning_content}
                         if message.content:
                             yield message.content
                     else:
@@ -442,12 +447,12 @@ class OpenAIAPI:
                             assistant_message["logprobs"] = choice.logprobs.content
                             messages.append(assistant_message)
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                                yield f"REASONING: {message.reasoning_content}"
+                                yield {"thought": message.reasoning_content}
                             yield f"{message.content or ''}\nLogprobs: {json.dumps(choice.logprobs.content, ensure_ascii=False)}"
                         else:
                             messages.append(assistant_message)
                             if hasattr(message, 'reasoning_content') and message.reasoning_content:
-                                yield f"REASONING: {message.reasoning_content}"
+                                yield {"thought": message.reasoning_content}
                             if message.content:
                                 yield message.content
                     break
@@ -473,11 +478,12 @@ class OpenAIAPI:
         frequency_penalty: Optional[float] = None,
         stop_sequences: Optional[List[str]] = None,
         response_format: Optional[Dict] = None,
+        reasoning_effort: Optional[str] = None,
         seed: Optional[int] = None,
         response_logprobs: Optional[bool] = None,
         logprobs: Optional[int] = None,
         retries: int = 3
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Union[str, Dict], None]:
         """发起聊天请求，支持多文件和多图片输入"""
         if isinstance(messages, str):
             messages = [{"role": "user", "content": [{"type": "text", "text": messages}]}]
@@ -494,7 +500,7 @@ class OpenAIAPI:
             max_output_tokens, system_instruction, topp, temperature,
             presence_penalty, frequency_penalty,
             stop_sequences, response_format,
-            seed, response_logprobs, logprobs,
+            reasoning_effort, seed, response_logprobs, logprobs,
             retries
         ):
             yield part
@@ -550,6 +556,8 @@ async def main():
     print("示例 1：单轮对话（非流式，无额外参数）")
     messages = [{"role": "user", "content": [{"type": "text", "text": "法国的首都是哪里？"}]}]
     async for part in api.chat(messages, stream=False):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
@@ -562,6 +570,8 @@ async def main():
         {"role": "user", "content": [{"type": "text", "text": "巴黎的人口是多少？"}]}
     ]
     async for part in api.chat(messages, stream=False):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
@@ -570,6 +580,8 @@ async def main():
     print("示例 3：单轮对话（流式，无额外参数）")
     messages = [{"role": "user", "content": [{"type": "text", "text": "讲一个关于魔法背包的故事。"}]}]
     async for part in api.chat(messages, stream=True):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
@@ -580,6 +592,8 @@ async def main():
         {"role": "user", "content": [{"type": "text", "text": "今天纽约的天气如何？"}]}
     ]
     async for part in api.chat(messages, stream=True, tools=tools, tool_fixed_params=tool_fixed_params, presence_penalty=0.5):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
@@ -590,17 +604,23 @@ async def main():
         {"role": "user", "content": [{"type": "text", "text": "请安排一个明天上午10点的会议，持续1小时，与会者是Alice和Bob。然后告诉我巴黎和波哥大的天气，并给 Bob 发送一封邮件（bob@email.com），内容为 'Hi Bob'。"}]}
     ]
     async for part in api.chat(messages, stream=True, tools=tools, tool_fixed_params=tool_fixed_params):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
     # 示例 6：推理模式（流式，启用推理）
+    # reasoning_effort 可选：minimal、low、medium、high
     print("示例 6：推理模式（流式，启用推理）")
     messages = [
         {"role": "user", "content": [{"type": "text", "text": "你好"}]}
     ]
-    async for part in api.chat(messages, stream=True, max_output_tokens=500):
-        print(part, end="", flush=True)
+    async for part in api.chat(messages, stream=True, max_output_tokens=500, reasoning_effort="low"):
+        if isinstance(part, dict) and "thought" in part:
+            print("思考过程:", part["thought"], flush=True)
+        else:
+            print(part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
 
@@ -626,6 +646,8 @@ async def main():
         {"role": "user", "content": [{"type": "text", "text": "请提供一个人的信息，包括姓名和年龄。"}]}
     ]
     async for part in api.chat(messages, stream=False, response_format=response_format):
+        if isinstance(part, dict) and "thought" in part:
+            continue
         print("结构化输出:", part, end="", flush=True)
     print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     print()
@@ -662,6 +684,8 @@ async def main():
         }]
         print("发送 PDF 文件进行聊天：")
         async for part in api.chat(messages, stream=False):
+            if isinstance(part, dict) and "thought" in part:
+                continue
             print(part, end="", flush=True)
         print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     else:
@@ -697,6 +721,8 @@ async def main():
         }]
         print("发送 inline 图片进行聊天：")
         async for part in api.chat(messages, stream=False):
+            if isinstance(part, dict) and "thought" in part:
+                continue
             print(part, end="", flush=True)
         print("\n更新后的消息列表：", json.dumps(messages, ensure_ascii=False, indent=2))
     else:
