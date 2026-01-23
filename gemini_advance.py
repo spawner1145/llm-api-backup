@@ -465,6 +465,7 @@ class GeminiAPI:
         topp: Optional[float] = None,
         temperature: Optional[float] = None,
         include_thoughts: Optional[bool] = None,
+        include_thoughts_in_history: bool = False,
         thinking_budget: Optional[int] = None,
         thinking_level: Optional[str] = None,
         topk: Optional[int] = None,
@@ -535,9 +536,15 @@ class GeminiAPI:
             for content in api_contents:
                 # role 映射：API 返回 "model"，前端习惯用 "assistant"
                 role = "assistant" if content["role"] == "model" else "user"
+                parts_for_history = content["parts"]
+                if not include_thoughts_in_history:
+                    parts_for_history = [
+                        part for part in parts_for_history
+                        if not (isinstance(part, dict) and part.get("thought") is True)
+                    ]
                 messages.append({
                     "role": role,
-                    "parts": content["parts"] # 直接引用原始 parts 列表，包含所有签名和标记
+                    "parts": parts_for_history # 默认不写入 thought 内容
                 })
 
     async def __aenter__(self):
