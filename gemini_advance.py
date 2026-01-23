@@ -31,26 +31,6 @@ class GeminiAPI:
         )
         self.tools = None  # 保存工具定义
 
-    def _normalize_tools(
-        self,
-        tools: Optional[Union[Dict[str, Callable], List[Dict], Dict]]
-    ) -> tuple[Optional[Dict[str, Callable]], Optional[List[Dict]]]:
-        """兼容新版可调用工具映射与旧版 function_declarations/tools 列表"""
-        if tools is None:
-            return None, None
-
-        if isinstance(tools, dict):
-            if "function_declarations" in tools:
-                return None, [{"functionDeclarations": tools.get("function_declarations", [])}]
-            if all(callable(v) for v in tools.values()):
-                return tools, None
-            return None, None
-
-        if isinstance(tools, list):
-            return None, tools
-
-        return None, None
-
     async def upload_file(self, file_path: str, display_name: Optional[str] = None) -> Dict[str, Union[str, None]]:
         """上传单个文件到 Gemini File API，并检查 ACTIVE 状态"""
         try:
@@ -264,7 +244,6 @@ class GeminiAPI:
         retries: int = 3
     ) -> AsyncGenerator[Union[str, Dict], None]:
         """核心 API 调用逻辑，支持所有 Gemini 模型参数"""
-        callable_tools, tool_definitions = self._normalize_tools(tools)
         if topp is not None and (topp < 0 or topp > 1):
             raise ValueError("topP 必须在 0 到 1 之间")
         if temperature is not None and (temperature < 0 or temperature > 2):
@@ -282,16 +261,14 @@ class GeminiAPI:
         if logprobs is not None and (logprobs < 0 or logprobs > 5):
             raise ValueError("logprobs 必须在 0 到 5 之间")
 
-        if callable_tools:
-            self.tools = callable_tools
+        if tools:
+            self.tools = tools
 
         body = {"contents": api_contents}
-        if tool_definitions is not None:
-            body["tools"] = tool_definitions
-        elif callable_tools:
+        if tools:
             function_declarations = []
             fixed_params = tool_fixed_params.get("all", {}) if tool_fixed_params else {}
-            for name, func in callable_tools.items():
+            for name, func in tools.items():
                 params = []
                 if hasattr(func, "__code__"):
                     params = func.__code__.co_varnames[:func.__code__.co_argcount]
@@ -389,14 +366,14 @@ class GeminiAPI:
                                             yield {"thought": part.get("text")}
                                         elif "text" in part:
                                             yield part["text"]
-                                        elif "functionCall" in part and callable_tools:
+                                        elif "functionCall" in part and tools:
                                             if model_message["parts"]:
                                                 api_contents.append(model_message)
                                             function_calls = [part["functionCall"]]
-                                            function_responses = await self._execute_tool(function_calls, callable_tools, tool_fixed_params)
+                                            function_responses = await self._execute_tool(function_calls, tools, tool_fixed_params)
                                             api_contents.extend(function_responses)
                                             async for text in self._chat_api(
-                                                api_contents, stream=stream, tools=callable_tools, tool_fixed_params=tool_fixed_params,
+                                                api_contents, stream=stream, tools=tools, tool_fixed_params=tool_fixed_params,
                                                 max_output_tokens=max_output_tokens,
                                                 system_instruction=system_instruction,
                                                 topp=topp, temperature=temperature,
@@ -440,10 +417,10 @@ class GeminiAPI:
                     function_calls = [part["functionCall"] for part in candidate["content"]["parts"] if "functionCall" in part]
                     if function_calls:
                         logger.info(f"发现函数调用: {function_calls}")
-                        function_responses = await self._execute_tool(function_calls, callable_tools, tool_fixed_params)
+                        function_responses = await self._execute_tool(function_calls, tools, tool_fixed_params)
                         api_contents.extend(function_responses)
                         async for text in self._chat_api(
-                            api_contents, stream=False, tools=callable_tools, tool_fixed_params=tool_fixed_params,
+                            api_contents, stream=False, tools=tools, tool_fixed_params=tool_fixed_params,
                             max_output_tokens=max_output_tokens,
                             system_instruction=system_instruction,
                             topp=topp, temperature=temperature,
